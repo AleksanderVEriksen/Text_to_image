@@ -1,7 +1,4 @@
-import os
-import sys
 from diffusers import DDPMScheduler
-
 from utils import plot_images, load_to_tensor, load_batch_to_tensor
 
 import numpy as np
@@ -33,7 +30,9 @@ plot_images(image, noisy_images, max_images=1)  # Adjusted to show all timesteps
 # Load a batch of images from the dataset and convert to tensor
 batch_size = 128
 images = load_batch_to_tensor(dataset, batch_size=batch_size)
-print(f"Batch shape: {images.shape}")  # Should be (batch_size, 3, 512, 512)
+print(f"Batch shape Image: {images.shape}")  # Should be (batch_size, 3, 512, 512)
+
+timesteps = torch.randint(0, max_timesteps, (batch_size,))  # Random timesteps for each image
 
 # Generate noisy images for the batch
 noise = torch.randn(images.shape)
@@ -48,7 +47,15 @@ for i in range(len(images)):
         noisy_seq.append(noisy_image[0])
     noisy_images.append(noisy_seq)
 noisy_images = np.stack(noisy_images, axis=0)  # (batch_size, max_timesteps, 3, 512, 512)
+noisy_images = torch.tensor(noisy_images, dtype=torch.float32)
 
-
+from matplotlib import pyplot as plt
+img = np.transpose(noisy_image[0], (1, 2, 0))  # Convert to HWC for plotting
+plt.imshow(img)
+plt.axis('off')
+plt.show()
 # Visualize the original and noisy images for the batch
-plot_images(images, noisy_images, max_images=1, max_noise=10, steps=2)  # Adjusted to show all timesteps
+plot_images(images, noisy_images, max_images=1, max_noise=10, steps=1)  # Adjusted to show all timesteps
+# Define and test the U-Net model
+print(f"Batch shape noisy: {noisy_images.shape}") # (batch_size, max_timesteps, 3, 512, 512)
+
