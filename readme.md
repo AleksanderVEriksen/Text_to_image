@@ -8,6 +8,22 @@ The process involves creating a network from scratch using PyTorch, train the mo
 
 The dataset consist of prompts that describes images, and the image itself.
 
-### Goal
+## PyTorch with Cuda enabled
+
+PyTorch will be utilized to create a UNET model as well as training the model. It will also be used to enable training on a GPU, which will make the training time faster.
+
+## File structure
+
+The files are divided into tasks that is needed to be done in order to train the model. The files are data, model, utils, playground and train.
+
+- The file Data prepares the data by fetching it from HuggingFace, and then loading it for usage.
+- Model is used to create the UNET model
+- utils are several helper functions used in different files which prevent code redundancy
+- playground is used to inspect and analyze the dataset, wit h the help of helper functions explained previously
+- train is used to train the model with the noisy images from the dataset
+
+## Goal
+
+### Step 1
 
 The first goal will be to apply noise to the images, then learn a UNET model to predict the noise level an image contain, so it can de-noise it later.
