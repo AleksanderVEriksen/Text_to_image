@@ -10,4 +10,4 @@ The dataset consist of prompts that describes images, and the image itself.
 
 ### Goal
 
-The first goal will be to create a layer that understand the text, and then process the information in a way to construct an image.
+The first goal will be to apply noise to the images, then learn a UNET model to predict the noise level an image contain, so it can de-noise it later.
