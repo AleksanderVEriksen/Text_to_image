@@ -24,6 +24,17 @@ The files are divided into tasks that is needed to be done in order to train the
 
 ## Goal
 
-### Step 1
+### Required
+
+    - Requires VAE (compress input, then decode it back)
+    - Tokenizer and encoder (text string into numerical representation)
+    - UNET (numeric representation can be feed into UNET as conditioning )
+    - Noise Scheduler (PNDMScheduler, LMSDiscreteScheduler)
+
+#### Step 1
 
 The first goal will be to apply noise to the images, then learn a UNET model to predict the noise level an image contain, so it can de-noise it later.
+
+#### Step 2
+
+Create a UNET that takes in "timesteps" in order to predict the denoise level of an image.
