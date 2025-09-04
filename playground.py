@@ -3,6 +3,7 @@ from utils import plot_images, load_to_tensor, load_batch_to_tensor
 
 import numpy as np
 import torch
+from matplotlib import pyplot as plt
 
 # Load dataset from data.py
 from data import get_dataset
@@ -18,17 +19,21 @@ noise_scheduler = DDPMScheduler(
 )
 
 # Load a single image from the dataset and convert to tensor
-image = load_to_tensor(dataset)
-
+images = load_batch_to_tensor(dataset, batch_size=16)  # Get the first image
+print(f"Single image shape: {images[0].shape}")  # Should be (3, 128, 128)
+plt.imshow(images[0].permute(1,2,0).numpy())
+plt.title("Original Image")
+plt.axis('off')
+plt.show()
 # Generate noisy images
-timesteps = torch.arange(0, max_timesteps)
-noise = torch.randn(image.shape)
-noisy_images = noise_scheduler.add_noise(image, noise, timesteps).numpy()
+timestep = torch.randint(0, max_timesteps, (images.shape[0],)) # Pick random noise step
+noise = torch.randn(images.shape)
+noisy_images = noise_scheduler.add_noise(images, noise, timestep)
 # Visualize the original and noisy images
-plot_images(image, noisy_images, max_images=1)  # Adjusted to show all timesteps
+plot_images(images, noisy_images, max_images=2)  # Adjusted to show all timesteps
 
 # Load a batch of images from the dataset and convert to tensor
-batch_size = 128
+batch_size = 16
 images = load_batch_to_tensor(dataset, batch_size=batch_size)
 print(f"Batch shape Image: {images.shape}")  # Should be (batch_size, 3, 512, 512)
 
@@ -36,18 +41,7 @@ timesteps = torch.randint(0, max_timesteps, (batch_size,))  # Random timesteps f
 
 # Generate noisy images for the batch
 noise = torch.randn(images.shape)
-noisy_images = []
-for i in range(len(images)):
-    img = images[i].unsqueeze(0)
-    noisy_seq = []
-    for t in range(max_timesteps):
-        noise = torch.randn(img.shape)
-        timestep = torch.tensor([t])
-        noisy_image = noise_scheduler.add_noise(img, noise, timestep).numpy()
-        noisy_seq.append(noisy_image[0])
-    noisy_images.append(noisy_seq)
-noisy_images = np.stack(noisy_images, axis=0)  # (batch_size, max_timesteps, 3, 512, 512)
-noisy_images = torch.tensor(noisy_images, dtype=torch.float32)
+noisy_image = noise_scheduler.add_noise(images, noise, timesteps)
 
 from matplotlib import pyplot as plt
 img = np.transpose(noisy_image[0], (1, 2, 0))  # Convert to HWC for plotting

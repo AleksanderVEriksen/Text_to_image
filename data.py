@@ -1,15 +1,14 @@
 from datasets import load_dataset
-from PIL import Image
-
 
 def get_dataset():
     base_url = "https://huggingface.co/datasets/jackyhate/text-to-image-2M/resolve/main/data_512_2M/data_{i:06d}.tar"
     num_shards = 46  # Number of webdataset tar files
     urls = [base_url.format(i=i) for i in range(num_shards)]
     dataset = load_dataset("webdataset", data_files={"train": urls}, split="train", streaming=True)
+    req = ['jpg', 'json']
+    dataset = dataset.remove_columns([col for col in dataset.column_names if col not in req])
     return dataset
 
-dataset = get_dataset()
 
 # Example of iterating through the dataset
 def show_sample_images(dataset, num_images=3):

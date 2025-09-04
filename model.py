@@ -1,22 +1,37 @@
 import torch
 import torch.nn as nn
 from torch.amp import autocast
+import torch.nn.functional as F
 
 def double_conv(inn, out):
     conv = nn.Sequential(
-        nn.Conv2d(inn, out, kernel_size=3),
+        nn.Conv2d(inn, out, kernel_size=3, padding=1),
         nn.ReLU(inplace=True),
-        nn.Conv2d(out, out, kernel_size=3),
+        nn.Conv2d(out, out, kernel_size=3, padding=1),
         nn.ReLU(inplace=True)
     )
     return conv
 
-def crop_tensor(tensor, target_tensor):
-    target_size = target_tensor.size()[2]
-    tensor_size = tensor.size()[2]
-    delta = tensor_size - target_size
-    delta = delta // 2
-    return tensor[:, :, delta:tensor_size - delta, delta:tensor_size - delta]
+def crop_tensor(enc_feat, x):
+    """
+    Matcher størrelsen på enc_feat til x.
+    - Hvis enc_feat er større -> crop
+    - Hvis enc_feat er mindre -> pad
+    """
+    _, _, H, W = x.shape
+    enc_H, enc_W = enc_feat.shape[2], enc_feat.shape[3]
+
+    # Crop hvis enc_feat er større
+    if enc_H > H or enc_W > W:
+        enc_feat = enc_feat[:, :, :H, :W]
+
+    # Pad hvis enc_feat er mindre
+    if enc_H < H or enc_W < W:
+        diffY = H - enc_H
+        diffX = W - enc_W
+        enc_feat = F.pad(enc_feat, [0, diffX, 0, diffY])  # [left, right, top, bottom]
+
+    return enc_feat
 
 class TimeEmbedding(nn.Module):
     def __init__(self, emb_dim):
@@ -35,14 +50,15 @@ class TimeEmbedding(nn.Module):
         return x  # (batch_size, emb_dim)
 
 class UNET(nn.Module):
-    # UNET for 3 channel images (RGB)
-    def __init__(self):
+    # UNET for 2 channel images (RGB)
+    def __init__(self, in_channels=3, out_channels=3):
+        assert in_channels == out_channels, "Input and output channels must be the same"
         super(UNET, self).__init__()
         # Downsampling
         self.max_pool_2x2 = nn.MaxPool2d(kernel_size=2, stride=2)
-        self.down_conv1 = double_conv(3, 64)
-        self.down_conv2 = double_conv(64, 128)
-        #self.down_conv3 = double_conv(128, 256)
+        self.down_conv1 = double_conv(in_channels, 32)
+        self.down_conv2 = double_conv(32, 64)
+        self.down_conv3 = double_conv(64, 128)
         #self.down_conv4 = double_conv(256, 512)
         #self.down_conv5 = double_conv(512, 1024)
 
@@ -54,27 +70,29 @@ class UNET(nn.Module):
         #self.up_conv1 = double_conv(1024, 512)
         #self.up_trans2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
         #self.up_conv2 = double_conv(512, 256)
-        #self.up_trans3 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
-        #self.up_conv3 = double_conv(256, 128)
-        self.up_trans4 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
-        self.up_conv4 = double_conv(128, 64)
-        self.out = nn.Conv2d(64, 2, kernel_size=1)
+        self.up_trans3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.up_conv3 = double_conv(128, 64)
+        self.up_trans4 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.up_conv4 = double_conv(64, 32)
+        self.out = nn.Conv2d(32, out_channels, kernel_size=1)
     
     @autocast(device_type='cuda')
     def forward(self, x, t):
+        # encode
         x1 = self.down_conv1(x)
         x2 = self.max_pool_2x2(x1)
         x3 = self.down_conv2(x2)
-        #x4 = self.max_pool_2x2(x3)
-        #x5 = self.down_conv3(x4)
+        x4 = self.max_pool_2x2(x3)
+        x5 = self.down_conv3(x4)
         #x6 = self.max_pool_2x2(x5)
         #x7 = self.down_conv4(x6)
         #x8 = self.max_pool_2x2(x7)
         #x9 = self.down_conv5(x8)
+
         # Add time embedding
         t_emb = self.time_mlp(t)
         t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
-        x3 = x3 + t_emb
+        x5 = x5 + t_emb
 
         # decode
         #x = self.up_trans1(x9)
@@ -83,15 +101,13 @@ class UNET(nn.Module):
         #x = self.up_trans2(x)
         #y = crop_tensor(x5, x)
         #x = self.up_conv2(torch.cat([x, y], dim=1))
-        #x = self.up_trans3(x)
-        #y = crop_tensor(x3, x)
-        #x = self.up_conv3(torch.cat([x, y], dim=1))
+        x = self.up_trans3(x5)
+        y = crop_tensor(x3, x)
+        x = self.up_conv3(torch.cat([x, y], dim=1))
         x = self.up_trans4(x)
         y = crop_tensor(x1, x)
         x = self.up_conv4(torch.cat([x, y], dim=1))
         x = self.out(x)
-        print(x.size())        
-
         return x
 
 

@@ -39,8 +39,14 @@ The first goal will be to apply noise to the images, then learn a UNET model to 
 
 Create a UNET that takes in "timesteps" in order to predict the denoise level of an image.
 
+#### Step 3 
+
+Adjust noise level for proper predictions
+
 ## Tests
 
 ![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png)
 
 ![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png)
+
+![Prediction with cutsom dataset](image-2.png)

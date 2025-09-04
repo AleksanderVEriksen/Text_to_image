@@ -1,72 +1,91 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torchvision
 
+import matplotlib.pyplot as plt
+import torchvision
+import torch
+import numpy as np
 
-def plot_images(normal_images, noisy_images, max_images, max_noise=5, steps=1):
+def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1):
+    """
+    normal_images: tensor [B,C,H,W] eller [C,H,W]
+    noisy_images: tensor [B,T,C,H,W] eller [T,C,H,W]
+    max_images: maks antall bilder fra batch å vise
+    max_noise: maks antall støy-step å vise per bilde
+    steps: steg mellom støy-visning
+    """
 
-    # Handle single image case
+    # Single image -> batch
     if normal_images.ndim == 3:
-        normal_images = normal_images.unsqueeze(0)
-    if isinstance(noisy_images, np.ndarray):
-        noisy_images = torch.from_numpy(noisy_images)
-    if noisy_images.ndim == 4:
-        noisy_images = noisy_images.unsqueeze(0)
+        normal_images = normal_images.unsqueeze(0)  # [1,C,H,W]
+    if noisy_images.ndim == 4:  # [T,C,H,W]
+        noisy_images = noisy_images.unsqueeze(0)  # [1,T,C,H,W]
 
-    # torch.Size([3, 512, 512]) torch.Size([4, 3, 512, 512])
-    for x in range(0, max_images):
-        image = normal_images[x]
-        noisy = noisy_images[x]
+    B = min(max_images, normal_images.shape[0])
 
-        # Remove batch dimension if present
-        if image.ndim == 4:
-            image = image[0]
-        if isinstance(noisy, np.ndarray):
-            noisy = torch.from_numpy(noisy)
-        if noisy.ndim == 5:
-            noisy = noisy[:, 0]  # remove batch dimension
+    for b in range(B):
+        orig = normal_images[b]          # [C,H,W]
+        noisy = noisy_images[b]          # [T,C,H,W]
 
         T = min(noisy.shape[0], max_noise)
         indices = list(range(0, T, steps))
-        num_plots = len(indices) + 1  # +1 for the original image
-        fig, axes = plt.subplots(1, num_plots, figsize=(3 * (num_plots), 3))
+        num_rows = 1 + len(indices)      # 1 rad for original + 1 rad per step
 
-        axes[0].imshow(np.clip(image.permute(1, 2, 0).numpy(), 0, 1))
+        fig, axes = plt.subplots(num_rows, 1, figsize=(5, 5*num_rows))
+        if num_rows == 1:
+            axes = [axes]
+        else:
+            axes = axes.flatten()
+
+        # Originalbilde øverst
+        img = orig.cpu()
+        grid = torchvision.utils.make_grid(img, nrow=4, normalize=True)
+        axes[0].imshow(grid.permute(1,2,0).numpy())
         axes[0].set_title("Original Image")
         axes[0].axis('off')
+
+        # Noisy steg under originalen
         for idx, i in enumerate(indices):
             img = noisy[i]
-            if img.ndim == 3:
-                img = img.permute(1, 2, 0).numpy()
-            elif img.ndim == 2:
-                img = img.numpy()  # No channel dimension
-            else:
-                raise ValueError(f"Unexpected noisy image shape: {img.shape}")
-            img = np.clip(img, 0, 1)
-            axes[idx + 1].imshow(img)
-            axes[idx + 1].set_title(f"Step {i+1}")
-            axes[idx + 1].axis('off')
+            if img.ndim == 2:
+                img = img.unsqueeze(0)
+            img = img.cpu()
+            grid = torchvision.utils.make_grid(img, nrow=4, normalize=True)
+            axes[idx+1].imshow(grid.permute(1,2,0).numpy())
+            axes[idx+1].set_title(f"Step {i+1}")
+            axes[idx+1].axis('off')
+
         plt.tight_layout()
         plt.show()
+
+
+from torchvision import transforms
+
+# Definer transformasjoner én gang
+transform = transforms.Compose([
+    transforms.Resize((128, 128)),   # resize til 128x128
+    transforms.ToTensor(),           # konverter til tensor og normaliser til [0,1]
+])
 
 # Load image to tensor
 def load_to_tensor(dataset):
     sample = next(iter(dataset))
     image = sample['jpg']
-    image = image.resize((512, 512))
-    image = np.array(image).astype(np.float32) / 255.0
-    image = torch.tensor(image).permute(2, 0, 1).unsqueeze(0)  # Convert to tensor and add batch dimension
+    image = transform(image)  # (C, H, W), normalisert til [0, 1]
     return image
 
 # Load batch of images to tensor
-def load_batch_to_tensor(dataset, batch_size=8):
+def load_batch_to_tensor(dataset, batch_size):
     images = []
     data_iter = iter(dataset)
     for _ in range(batch_size):
         sample = next(data_iter)
-        image = sample['jpg'].resize((512, 512))
-        image = np.array(image).astype(np.float32) / 255.0
-        image = torch.tensor(image).permute(2, 0, 1)  # (C, H, W)
+        if isinstance(sample, dict):
+            image = transform(sample['jpg'])
+        else:
+            image = transform(sample[0])
         images.append(image)
     batch = torch.stack(images, dim=0)  # (batch_size, C, H, W)
     return batch
