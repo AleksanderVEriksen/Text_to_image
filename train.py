@@ -25,7 +25,7 @@ else:
 
 Test = True
 
-num_epochs = 2
+num_epochs = 20
 batch_size = 128
 max_timesteps = 10
 
@@ -40,7 +40,7 @@ else:
     train_dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
 
 # Create the UNET model
-model = BasicUNet().to(autocast_device)
+model = BasicUNet(in_channels=1, out_channels=1).to(autocast_device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() 
@@ -68,30 +68,5 @@ for epoch in trange(num_epochs):
         optimizer.step()
     print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item():.4f}")
 
-# Fetch some data
-x, y = next(iter(train_dataloader))
-x = x[:8].to(autocast_device) # Only using the first 8 for easy plotting
-
-# Corrupt with a range of amounts
-amount = torch.linspace(0, 1, x.shape[0]) # Left to right -> more corruption
-for i, a in enumerate(amount):
-    t = int(a * (max_timesteps - 1))  # Scale to max_timesteps
-    timestep = torch.tensor([t])
-    noise = torch.randn_like(x)
-    noised_x = noise_scheduler.add_noise(x[i:i+1], noise, timestep ) if i == 0 else torch.cat( (noised_x, noise_scheduler.add_noise(x[i:i+1], noise, torch.tensor([t]))), dim=0)
-timesteps = torch.tensor([int(a * (max_timesteps - 1)) for a in amount]).to(autocast_device)
-
-# Get the model predictions
-with torch.no_grad():
-    preds = model(noised_x, timesteps)
-
-import matplotlib.pyplot as plt
-# Plot
-fig, axs = plt.subplots(3, 1, figsize=(12, 7))
-axs[0].set_title('Input data')
-axs[0].imshow(torchvision.utils.make_grid(x)[0].cpu().clip(0, 1), cmap='Greys')
-axs[1].set_title('Corrupted data')
-axs[1].imshow(torchvision.utils.make_grid(noised_x)[0].cpu().clip(0, 1), cmap='Greys')
-axs[2].set_title('Network Predictions')
-axs[2].imshow(torchvision.utils.make_grid(preds)[0].cpu().clip(0, 1), cmap='Greys')
-plt.show()
+# Save the model after training
+torch.save(model.state_dict(), 'model.pth')

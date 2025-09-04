@@ -42,3 +42,5 @@ Create a UNET that takes in "timesteps" in order to predict the denoise level of
 ## Tests
 
 ![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png)
+
+![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png)

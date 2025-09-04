@@ -97,13 +97,17 @@ class UNET(nn.Module):
 
 class BasicUNet(nn.Module):
     """A minimal UNet implementation."""
-    def __init__(self, in_channels=1, out_channels=1):
+    def __init__(self, in_channels=1, out_channels=1, TEST=False):
         super().__init__()
+        self.TEST = TEST
         self.down_layers = torch.nn.ModuleList([ 
             nn.Conv2d(in_channels, 32, kernel_size=5, padding=2),
             nn.Conv2d(32, 64, kernel_size=5, padding=2),
             nn.Conv2d(64, 64, kernel_size=5, padding=2),
         ])
+
+        self.time_mlp = TimeEmbedding(64)
+
         self.up_layers = torch.nn.ModuleList([
             nn.Conv2d(64, 64, kernel_size=5, padding=2),
             nn.Conv2d(64, 32, kernel_size=5, padding=2),
@@ -112,15 +116,23 @@ class BasicUNet(nn.Module):
         self.act = nn.SiLU() # The activation function
         self.downscale = nn.MaxPool2d(2)
         self.upscale = nn.Upsample(scale_factor=2)
-
-    def forward(self, x):
+    def forward(self, x, t):
         h = []
+        # First the down layers
         for i, l in enumerate(self.down_layers):
             x = self.act(l(x)) # Through the layer and the activation function
             if i < 2: # For all but the third (final) down layer:
                 h.append(x) # Storing output for skip connection
                 x = self.downscale(x) # Downscale ready for the next layer
-            
+        # Add time embedding
+        if self.TEST:
+            print("Before t_emb:", x.shape)
+            t_emb = self.time_mlp(t)
+            t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
+            x = x + t_emb
+            print("After t_emb", x.shape)
+            self.TEST = False
+        # Now the up layers
         for i, l in enumerate(self.up_layers):
             if i > 0: # For all except the first up layer
                 x = self.upscale(x) # Upscale
