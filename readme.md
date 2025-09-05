@@ -14,13 +14,14 @@ PyTorch will be utilized to create a UNET model as well as training the model. I
 
 ## File structure
 
-The files are divided into tasks that is needed to be done in order to train the model. The files are data, model, utils, playground and train.
+The files are divided into tasks that is needed to be done in order to train the model. The files are data, model, utils, playground, train and eval.
 
 - The file Data prepares the data by fetching it from HuggingFace, and then loading it for usage.
 - Model is used to create the UNET model
 - utils are several helper functions used in different files which prevent code redundancy
 - playground is used to inspect and analyze the dataset, wit h the help of helper functions explained previously
 - train is used to train the model with the noisy images from the dataset
+- eval is used to evaluate the trained and saved models
 
 ## Goal
 
@@ -39,7 +40,7 @@ The first goal will be to apply noise to the images, then learn a UNET model to 
 
 Create a UNET that takes in "timesteps" in order to predict the denoise level of an image.
 
-#### Step 3 
+#### Step 3
 
 Adjust noise level for proper predictions
 

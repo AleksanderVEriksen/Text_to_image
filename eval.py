@@ -1,6 +1,6 @@
 import torch
 import torchvision
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 import torch.nn as nn
 
@@ -28,21 +28,45 @@ parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET 
 args = parser.parse_args()
 # ----------------------------------------------
 
+batch_size = args.batch_size
+max_timesteps = args.max_timesteps
+Test = args.test
 
-if args.test == False:
-    print("Testing on custom dataset")
-    dataset = get_dataset()
-    dataset = load_batch_to_tensor(dataset, args.batch_size)
-    train_dataloader = DataLoader(dataset, args.batch_size)
+# Load dataset from data.py
+if Test == False:
+    print("\n---Training on custom dataset---\n")
+    train, val, test = get_dataset()
+
+    train_set = load_batch_to_tensor(train, batch_size)
+    val_set = load_batch_to_tensor(val, batch_size)
+    test_set = load_batch_to_tensor(test, batch_size)
+
+    train_dataloader = DataLoader(train_set, batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_set, batch_size, shuffle=True)
+    test_dataloader = DataLoader(test_set, batch_size, shuffle=False)
+
 else:
     # Load example dataset for testing
-    dataset = torchvision.datasets.MNIST(root="mnist/", train=True, download=True, transform=torchvision.transforms.ToTensor())
-    train_dataloader = DataLoader(dataset, batch_size=8, shuffle=True)
+    print("\n---Testing on MNIST dataset---\n")
+    train_ = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
+    test_ = torchvision.datasets.MNIST(root="mnist/", train=False, download=True)
+
+    train_size = int((1 - len(train_)*0.8))
+    val_size = (len(train_)-train_size)
+    train, val = random_split(train_, [train_size, val_size] )
+
+    train_set = load_batch_to_tensor(train, batch_size)
+    val_set = load_batch_to_tensor(val, batch_size)
+    test_set = load_batch_to_tensor(test_, batch_size)
+
+    train_dataloader = DataLoader(train_set, batch_size, shuffle=True)
+    val_dataloader = DataLoader(val_set, batch_size, shuffle=True)
+    test_dataloader = DataLoader(test_set, batch_size, shuffle=False)
 
 
 # Create the UNET model
-if args.model == "Basic": model = BasicUNet(in_channels= 1 if args.test else 3, out_channels=1 if args.test else 3).to(autocast_device)
-else: model = UNET(in_channels= 1 if args.test else 3, out_channels=1 if args.test else 3).to(autocast_device)
+if args.model == "Basic": model = BasicUNet(in_channels= 1 if Test else 3, out_channels=1 if Test else 3).to(autocast_device)
+else: model = UNET(in_channels= 1 if Test else 3, out_channels=1 if Test else 3).to(autocast_device)
 
 if args.test:
     # Load the trained model weights
@@ -54,7 +78,6 @@ else:
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() 
 
-max_timesteps = args.max_timesteps
 
 # Configurate the noise scheduler
 noise_scheduler = DDPMScheduler(
@@ -66,8 +89,8 @@ noise_scheduler = DDPMScheduler(
 
 
 # Fetch some data
-x = next(iter(train_dataloader))
-x = x[:args.batch_size].to(autocast_device)
+x = next(iter(test_dataloader))
+x = x[:batch_size].to(autocast_device)
 
 # Corrupt with a range of amounts
 timestep = torch.randint(0, max_timesteps, (x.shape[0],)).to(autocast_device)

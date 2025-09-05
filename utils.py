@@ -70,22 +70,19 @@ transform = transforms.Compose([
 ])
 
 # Load image to tensor
-def load_to_tensor(dataset):
+def load_single_img_to_tensor(dataset):
     sample = next(iter(dataset))
     image = sample['jpg']
     image = transform(image)  # (C, H, W), normalisert til [0, 1]
     return image
 
-# Load batch of images to tensor
-def load_batch_to_tensor(dataset, batch_size):
-    images = []
-    data_iter = iter(dataset)
-    for _ in range(batch_size):
-        sample = next(data_iter)
-        if isinstance(sample, dict):
-            image = transform(sample['jpg'])
-        else:
-            image = transform(sample[0])
-        images.append(image)
-    batch = torch.stack(images, dim=0)  # (batch_size, C, H, W)
-    return batch
+# Load dataset of images to tensor
+def sample_to_tensor(sample):
+    if isinstance(sample, dict):
+        return transform(sample['jpg'])
+    else:
+        return transform(sample[0])
+    
+def collate_fn(batch):
+    images = [sample_to_tensor(img) for img in batch]
+    return torch.stack(images, dim=0)

@@ -1,7 +1,7 @@
 from diffusers import DDPMScheduler
-from utils import load_batch_to_tensor
+from utils import collate_fn
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import torchvision
 
 import torch
@@ -54,23 +54,36 @@ if __name__ == "__main__":
     # Load dataset from data.py
     if args.test == False:
         print("Training on custom dataset")
-        dataset = get_dataset()
-        dataset = load_batch_to_tensor(dataset, batch_size)
-        train_dataloader = DataLoader(dataset, batch_size)
-        channels = 3
+
+        train = get_dataset(train = True)
+        test = get_dataset(test = True)
+        val = get_dataset(val = True)
+
+        train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn)
+        val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn)
+        test_dataloader = DataLoader(test, batch_size, collate_fn=collate_fn)
+
     else:
         # Load example dataset for testing
-        print("Testing on MNIST dataset")
-        dataset = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
-        dataset = load_batch_to_tensor(dataset, batch_size)
-        train_dataloader = DataLoader(dataset, batch_size, shuffle=True)
-        channels = 1
+        print("\n---Testing on MNIST dataset---")
+        train_ = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
+        test_ = torchvision.datasets.MNIST(root="mnist/", train=False, download=True)
+
+        train_size = int((1 - len(train_)*0.8))
+        val_size = (len(train_)-train_size)
+        train, val = random_split(train_, [train_size, val_size] )
+
+        train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn)
+        val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn)
+        test_dataloader = DataLoader(test_, batch_size, collate_fn=collate_fn)
+
     # Create the UNET model
     if args.model == "Basic":
         model = BasicUNet(in_channels=1, out_channels=1).to(autocast_device)
     else:
-        model = UNET(channels, channels).to(autocast_device)
-    print("Input channels: ", channels)
+        model = UNET(in_channels = 1 if Test else 3, out_channels = 1 if Test else 3).to(autocast_device)
+    
+    print(f"\nInput channels:  {next(iter(train_dataloader)).size()}\n")
 
     batch_size = args.batch_size
     num_epochs = args.epochs
