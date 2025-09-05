@@ -3,12 +3,11 @@ import torchvision
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 import torch.nn as nn
-
+import numpy as np
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
-from utils import load_batch_to_tensor, plot_images
-from torch.amp import autocast
+from utils import collate_fn
 import argparse
 
 if torch.cuda.is_available():
@@ -37,13 +36,10 @@ if Test == False:
     print("\n---Training on custom dataset---\n")
     train, val, test = get_dataset()
 
-    train_set = load_batch_to_tensor(train, batch_size)
-    val_set = load_batch_to_tensor(val, batch_size)
-    test_set = load_batch_to_tensor(test, batch_size)
 
-    train_dataloader = DataLoader(train_set, batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_set, batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_set, batch_size, shuffle=False)
+    train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
+    val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn, shuffle=True)
+    test_dataloader = DataLoader(test, batch_size, collate_fn=collate_fn, shuffle=False)
 
 else:
     # Load example dataset for testing
@@ -55,13 +51,10 @@ else:
     val_size = (len(train_)-train_size)
     train, val = random_split(train_, [train_size, val_size] )
 
-    train_set = load_batch_to_tensor(train, batch_size)
-    val_set = load_batch_to_tensor(val, batch_size)
-    test_set = load_batch_to_tensor(test_, batch_size)
 
-    train_dataloader = DataLoader(train_set, batch_size, shuffle=True)
-    val_dataloader = DataLoader(val_set, batch_size, shuffle=True)
-    test_dataloader = DataLoader(test_set, batch_size, shuffle=False)
+    train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
+    val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn, shuffle=True)
+    test_dataloader = DataLoader(test_, batch_size, collate_fn=collate_fn, shuffle=False)
 
 
 # Create the UNET model
@@ -78,14 +71,12 @@ else:
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() 
 
-
 # Configurate the noise scheduler
 noise_scheduler = DDPMScheduler(
     num_train_timesteps=max_timesteps,
     beta_start=0.0001,
     beta_end=0.02,
 )
-
 
 
 # Fetch some data
@@ -108,17 +99,28 @@ denoised_vis = (denoised - denoised.min()) / (denoised.max() - denoised.min() + 
 
 
 # Plot
-fig, axs = plt.subplots(3, 1, figsize=(10, 7))
-axs[0].set_title('Input data')
+fig, axs = plt.subplots(4, 1, figsize=(12, 8))
+axs[0].set_title('Input data', fontsize=8)
 input_image = torchvision.utils.make_grid(x).cpu().clip(0, 1)
-axs[0].imshow(input_image.permute(1,2,0).numpy())
+axs[0].imshow(input_image.permute(1,2,0).numpy().astype(np.float32))
 
-axs[1].set_title(f'Corrupted data with timestep: {timestep.cpu().numpy()}')
+axs[1].set_title(f'Corrupted data with timestep: {timestep.cpu().numpy()}', fontsize=8)
 corrupted_image = torchvision.utils.make_grid(noised_x).cpu()
 corrupted_image = corrupted_image.clamp(0, 1)
-axs[1].imshow(corrupted_image.permute(1,2,0).numpy())
+axs[1].imshow(corrupted_image.permute(1,2,0).numpy().astype(np.float32))
 
-axs[2].set_title('Network Predictions')
+axs[2].set_title('Noise Predictions', fontsize=8)
+predicted_noise = torchvision.utils.make_grid(pred.detach().cpu()).clip(0, 1)
+axs[2].imshow((predicted_noise.permute(1,2,0).numpy().astype(np.float32)))
+
+axs[3].set_title('Network Predictions', fontsize=8)
 predicted_image = torchvision.utils.make_grid(denoised_vis.cpu()).clip(0, 1)
-axs[2].imshow((predicted_image.permute(1,2,0).numpy()))
+axs[3].imshow((predicted_image.permute(1,2,0).numpy().astype(np.float32)))
+
+plt.subplots_adjust(hspace=0.4)  # vertical spacing
+if Test:
+    plt.savefig(f"figures/eval_{batch_size}_MNIST.png")
+else:
+    plt.savefig(f"figures/eval_{batch_size}_custom.png")
+
 plt.show()
