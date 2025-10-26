@@ -21,15 +21,15 @@ def crop_tensor(enc_feat, x):
     _, _, H, W = x.shape
     enc_H, enc_W = enc_feat.shape[2], enc_feat.shape[3]
 
-    # Crop hvis enc_feat er større
+    # *Crop hvis enc_feat er større
     if enc_H > H or enc_W > W:
         enc_feat = enc_feat[:, :, :H, :W]
 
-    # Pad hvis enc_feat er mindre
+    # *Pad hvis enc_feat er mindre
     if enc_H < H or enc_W < W:
         diffY = H - enc_H
         diffX = W - enc_W
-        enc_feat = F.pad(enc_feat, [0, diffX, 0, diffY])  # [left, right, top, bottom]
+        enc_feat = F.pad(enc_feat, [0, diffX, 0, diffY])  # *[left, right, top, bottom]
 
     return enc_feat
 
@@ -41,7 +41,7 @@ class TimeEmbedding(nn.Module):
         self.linear2 = nn.Linear(emb_dim, emb_dim)
 
     def forward(self, t):
-        # t: (batch_size,) or (batch_size, 1)
+        # *t: (batch_size,) or (batch_size, 1)
         if t.ndim == 1:
             t = t.unsqueeze(-1)
         x = self.linear1(t.float())
@@ -50,7 +50,7 @@ class TimeEmbedding(nn.Module):
         return x  # (batch_size, emb_dim)
 
 class UNET(nn.Module):
-    # UNET for 2 channel images (RGB)
+    # *UNET for 2 channel images (RGB)
     def __init__(self, in_channels=3, out_channels=3):
         assert in_channels == out_channels, "Input and output channels must be the same"
         super(UNET, self).__init__()
@@ -62,7 +62,7 @@ class UNET(nn.Module):
         #self.down_conv4 = double_conv(256, 512)
         #self.down_conv5 = double_conv(512, 1024)
 
-        # Time embedding
+        # *Time embedding
         self.time_mlp = TimeEmbedding(128)
         
         # Upsampling
@@ -89,7 +89,7 @@ class UNET(nn.Module):
         #x8 = self.max_pool_2x2(x7)
         #x9 = self.down_conv5(x8)
 
-        # Add time embedding
+        # *Add time embedding
         t_emb = self.time_mlp(t)
         t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
         x5 = x5 + t_emb
@@ -115,7 +115,9 @@ class BasicUNet(nn.Module):
     """A minimal UNet implementation."""
     def __init__(self, in_channels=1, out_channels=1, TEST=False):
         super().__init__()
-        self.TEST = TEST
+
+        self.TEST = TEST # * For MNIST dataset
+
         self.down_layers = torch.nn.ModuleList([ 
             nn.Conv2d(in_channels, 32, kernel_size=5, padding=2),
             nn.Conv2d(32, 64, kernel_size=5, padding=2),
@@ -141,13 +143,15 @@ class BasicUNet(nn.Module):
                 h.append(x) # Storing output for skip connection
                 x = self.downscale(x) # Downscale ready for the next layer
         # Add time embedding
+        # * Only for testing on MNIST
         if self.TEST:
             print("Before t_emb:", x.shape)
             t_emb = self.time_mlp(t)
             t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
             x = x + t_emb
             print("After t_emb", x.shape)
-            self.TEST = False
+            self.TEST = False 
+
         # Now the up layers
         for i, l in enumerate(self.up_layers):
             if i > 0: # For all except the first up layer
@@ -156,12 +160,6 @@ class BasicUNet(nn.Module):
             x = self.act(l(x)) # Through the layer and the activation function
             
         return x
-
-
-
-
-
-
 
 
 

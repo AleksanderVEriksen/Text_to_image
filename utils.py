@@ -86,3 +86,37 @@ def sample_to_tensor(sample):
 def collate_fn(batch):
     images = [sample_to_tensor(img) for img in batch]
     return torch.stack(images, dim=0)
+
+
+# Sample generated images
+def sample_images(model, betas, img_size, device, n=16):
+
+    T = len(betas)
+    alphas = 1 - betas
+    alpha_cumprod = torch.cumprod(alphas, dim=0)
+    sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
+    sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod)
+
+    x = torch.randn((n, 3, img_size, img_size), device=device)
+
+    for t in reversed(range(T)):
+        t_batch = torch.full((n,), t, device=device, dtype=torch.long)
+        with torch.no_grad():
+            predicted_noise = model(x, t_batch)
+
+        coef1 = sqrt_recip_alphas[t]
+        coef2 = sqrt_one_minus_alpha_cumprod[t]
+
+        x0_pred = (x - coef2 * predicted_noise) / coef1
+
+        if t > 0:
+            noise = torch.randn_like(x)
+            beta_t = betas[t]
+            alpha_t = alphas[t]
+            alpha_cumprod_t = alpha_cumprod[t]
+            sigma_t = torch.sqrt(beta_t * (1 - alpha_cumprod_t) / (1 - alpha_t))
+            x = torch.sqrt(alpha_t) * x0_pred + sigma_t * noise
+        else:
+            x = x0_pred
+        
+        return x  # Returner de genererte bildene

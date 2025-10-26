@@ -7,7 +7,7 @@ import numpy as np
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
-from utils import collate_fn
+from utils import collate_fn, sample_images
 import argparse
 
 if torch.cuda.is_available():
@@ -88,6 +88,10 @@ timestep = torch.randint(0, max_timesteps, (x.shape[0],)).to(autocast_device)
 noise = torch.randn_like(x).to(autocast_device)
 noised_x = noise_scheduler.add_noise(x, noise, timestep)
 
+# Prepare betas for reconstruction
+T = noise_scheduler.config.num_train_timesteps
+betas = torch.linspace(noise_scheduler.config.beta_start, noise_scheduler.config.beta_end, T, dtype=torch.float32, device=noised_x.device)
+
 # Get the model predictions
 model.eval()
 with torch.no_grad():
@@ -95,11 +99,25 @@ with torch.no_grad():
 
 # Normalize for visualization - Subtracting the predicted from the noised input to obtain original image
 denoised = noised_x - pred
-denoised_vis = (denoised - denoised.min()) / (denoised.max() - denoised.min() + 1e-8)
+# Calculate reconstructed image from predicted noise
+alpha_bar = torch.cumprod(betas.add(1).sub(betas), dim=0)  # eller bruk din predefinerte alpha_bar array
+alpha_bar_t = alpha_bar[timestep].view(-1, 1, 1, 1)
+
+# Reverse diffusion step (x0 reconstruction)
+x0_pred = (noised_x - torch.sqrt(1 - alpha_bar_t) * pred) / torch.sqrt(alpha_bar_t)
+
+# Normalize for visualization
+denoised_vis = (x0_pred - x0_pred.min()) / (x0_pred.max() - x0_pred.min() + 1e-8)
+
+# Generate new samples from pure noise
+samples = sample_images(model, betas, img_size=28, device=autocast_device, n=16)
+samples = (samples.clamp(-1, 1) + 1) / 2  # Normalize to [0, 1]
+samples = samples.cpu().numpy()
+samples = np.clip(samples, 0, 1)
 
 
 # Plot
-fig, axs = plt.subplots(4, 1, figsize=(12, 8))
+fig, axs = plt.subplots(5, 1, figsize=(12, 8))
 axs[0].set_title('Input data', fontsize=8)
 input_image = torchvision.utils.make_grid(x).cpu().clip(0, 1)
 axs[0].imshow(input_image.permute(1,2,0).numpy().astype(np.float32))
@@ -118,9 +136,25 @@ predicted_image = torchvision.utils.make_grid(denoised_vis.cpu()).clip(0, 1)
 axs[3].imshow((predicted_image.permute(1,2,0).numpy().astype(np.float32)))
 
 plt.subplots_adjust(hspace=0.4)  # vertical spacing
-if Test:
-    plt.savefig(f"figures/eval_{batch_size}_MNIST.png")
-else:
-    plt.savefig(f"figures/eval_{batch_size}_custom.png")
 
+plt.savefig(
+    f"figures/eval_{batch_size}_{'MNIST' if Test else 'custom'}.png",
+    bbox_inches="tight",
+)
+
+plt.show()
+
+
+# Plot generated samples in a grid
+grid = torchvision.utils.make_grid(samples, nrow=4, padding=2, normalize=False)
+
+plt.figure(figsize=(6, 6))
+plt.title("Generated Samples from Pure Noise", fontsize=14)
+plt.imshow(grid.permute(1, 2, 0).cpu().numpy())
+plt.axis("off")
+
+plt.savefig(
+    f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png",
+    bbox_inches="tight",
+)
 plt.show()

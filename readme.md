@@ -21,7 +21,23 @@ The files are divided into tasks that is needed to be done in order to train the
 - utils are several helper functions used in different files which prevent code redundancy
 - playground is used to inspect and analyze the dataset, wit h the help of helper functions explained previously
 - train is used to train the model with the noisy images from the dataset
-- eval is used to evaluate the trained and saved models
+- eval is used to evaluate the trained/saved models
+
+## How to run
+
+Commands to use to run this program. Args for train and eval are not necessary, but should be used if one want to train or eval on custom configurations. Only **epochs** for *train.py* should be considered at all times due to how it affect the learning of the model.
+
+### Go into venv
+
+``./venv/Scripts/Activate``
+
+### Run train
+
+``Commands: python train.py --batch_size(int) --epochs(default 5) --max_timesteps(default 10) --test(include if MNIST dataset) --model(Basic or UNET) --custom_model_name(default model)``
+
+### Run eval
+
+``Commands: python eval.py --batch_size(int) --max_timesteps(default 10) --test() --model(Basic or UNET)``
 
 ## Goal
 
@@ -46,8 +62,23 @@ Adjust noise level for proper predictions
 
 ## Tests
 
-![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png)
+|![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png "Basic UNET - No added timesteps")|
+|:--:|
+|*"Basic UNET - No added timesteps"*|
 
-![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png)
+|![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png "Added timesteps")|
+|:--:|
+|*Basic UNET - Added timesteps*|
 
-![Prediction with cutsom dataset](image-2.png)
+|![Prediction with cutsom dataset](image-2.png "Custom dataset")|
+|:--:|
+|*Prediction with Custom dataset*|
+
+|![Evaluation of trained UNET on MNIST dataset](image-3.png "Eval on model trained on MNIST")|
+|:--:|
+|*Evaluation of trained UNET on MNIST dataset*|
+
+
+|![Generate images with trained custom UNET]( "Generated image")|
+|:--:|
+|*Generate images with trained custom UNET*|
