@@ -78,7 +78,6 @@ Adjust noise level for proper predictions
 |:--:|
 |*Evaluation of trained UNET on MNIST dataset*|
 
-
 |![Generate images with trained custom UNET]( "Generated image")|
 |:--:|
 |*Generate images with trained custom UNET*|
