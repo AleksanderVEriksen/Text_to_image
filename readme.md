@@ -77,22 +77,23 @@ Adjust noise level for proper predictions
 
 ## Tests
 
-|![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png "Basic UNET - No added timesteps")|
-|:--:|
 |*"Basic UNET - No added timesteps"*|
-
-|![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png "Added timesteps")|
 |:--:|
+|![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png "Basic UNET - No added timesteps")|
+
 |*Basic UNET - Added timesteps*|
-
-|![Prediction with cutsom dataset](image-2.png "Custom dataset")|
 |:--:|
-|*Prediction with Custom dataset*|
+|![MNIST dataset test on Basic UNET -- Added Timestep to UNET](image-1.png "Added timesteps")|
 
+|*Prediction with Custom dataset*|
+|:--:|
+|![Prediction with cutsom dataset](image-2.png "Custom dataset")|
+
+|*Evaluation of trained UNET on MNIST dataset*|
+|:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-3.png "Eval on model trained on MNIST")|
 |:--:|
-|*Evaluation of trained UNET on MNIST dataset*|
 
-|![Generate images with trained custom UNET]( "Generated image")|
-|:--:|
 |*Generate images with trained custom UNET*|
+|:--:|
+|![Generate images with trained custom UNET]( "Generated image")|
