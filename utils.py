@@ -86,27 +86,57 @@ def collate_fn(batch):
 
 # Sample generated images
 # use scheduler.set_timesteps(...) before calling this
-def sample_images(model, scheduler: DDPMScheduler, img_size: int, device, n: int = 16, Test: bool = False, debug: bool = False):
+def sample_images(model, scheduler: DDPMScheduler, img_size: int, device, n: int = 16, Test: bool = False, debug: bool = False, save_intermediates: bool = False):
     """
     Use diffusers scheduler for sampling. Call scheduler.set_timesteps(num_inference_steps)
     before calling this function. Returns CPU tensor (n,C,H,W).
+
+    debug: print per-step stats (already present).
+    save_intermediates: save x0_pred grids at a few checkpoints (helps inspect progressive denoising).
     """
     model.eval()
     channels = 1 if Test else 3
     x = torch.randn((n, channels, img_size, img_size), device=device)
-    # scheduler.timesteps must be set by caller (scheduler.set_timesteps)
-    noise_scheduler = scheduler(num_train_timesteps=scheduler.config.num_train_timesteps, beta_start=scheduler.config.beta_start, beta_end=scheduler.config.beta_end)
-    noise_scheduler.set_timesteps(scheduler.config.num_train_timesteps)
-    timesteps = list(scheduler.timesteps)   # descending
+
+    # prepare beta / alpha arrays from scheduler (device-aware)
+    betas = scheduler.betas.to(device) if hasattr(scheduler, "betas") else torch.linspace(scheduler.beta_start, scheduler.beta_end, scheduler.config.num_train_timesteps, device=device)
+    alphas = 1.0 - betas
+    alpha_cumprod = torch.cumprod(alphas, dim=0)
+    sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod)
+    sqrt_one_minus_alpha_cumprod = torch.sqrt(1.0 - alpha_cumprod)
+
+    timesteps = list(scheduler.timesteps)
+    saved = {}
     for i, t in enumerate(timesteps):
         t_int = int(t)
         t_batch = torch.full((n,), t_int, device=device, dtype=torch.long)
         with torch.no_grad():
             eps_pred = model(x, t_batch)
+
+        # compute x0 estimate for debugging/visualization (per-sample)
+        denom = sqrt_alpha_cumprod[t_int].view(1, 1, 1, 1)
+        x0_pred = (x - sqrt_one_minus_alpha_cumprod[t_int].view(1,1,1,1) * eps_pred) / (denom + 1e-8)
+
         out = scheduler.step(model_output=eps_pred, timestep=t_int, sample=x)
         x = out.prev_sample if hasattr(out, "prev_sample") else out["prev_sample"]
 
         if debug:
-            print(f"step {i}/{len(timesteps)-1} t={t_int} | x stats min/max/mean/std:",
-                float(x.min()), float(x.max()), float(x.mean()), float(x.std()))
-    return x.cpu()
+            print(f"step {i}/{len(timesteps)-1} t={t_int} | x stats min/max/mean/std: {float(x.min()):.6f}/{float(x.max()):.6f}/{float(x.mean()):.6f}/{float(x.std()):.6f}")
+
+        # optionally save intermediate x0_pred visualizations at a few checkpoints
+        if save_intermediates and (i in (0, len(timesteps)//4, len(timesteps)//2, 3*len(timesteps)//4, len(timesteps)-1)):
+            # normalize each sample independently for visibility (keeps relative structure)
+            xp = x0_pred.detach().cpu().clone()
+            N = xp.shape[0]
+            for j in range(N):
+                s = xp[j]
+                mn, mx = float(s.min()), float(s.max())
+                if mx - mn > 1e-8:
+                    xp[j] = (s - mn) / (mx - mn)
+                else:
+                    xp[j] = s - mn
+            grid = torchvision.utils.make_grid(xp, nrow=int(max(1, min(8, N//2))), normalize=False, pad_value=1)
+            saved[f"step_{t_int}"] = grid.permute(1,2,0).numpy()
+
+    # final sample on CPU
+    return x.cpu(), saved

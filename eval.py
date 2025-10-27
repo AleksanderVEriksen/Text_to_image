@@ -8,12 +8,15 @@ from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
 from utils import collate_fn, sample_images
+from ema import ExponentialMovingAverage
 import argparse
 import sys
 import os
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 autocast_device = "cuda" if device.type == "cuda" else "cpu"
+
+
 
 # *Parse command line arguments
 def parse_args():
@@ -45,7 +48,6 @@ if Checkpoint:
 
 # Load dataset from data.py
 if Test == False:
-    print("\n---Training on custom dataset---\n")
     train, val, test = get_dataset()
 
     train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
@@ -54,7 +56,6 @@ if Test == False:
 
 else:
     # Load example dataset for testing
-    print("\n---Testing on MNIST dataset---\n")
     mnist_train = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
     mnist_test = torchvision.datasets.MNIST(root="mnist/", train=False, download=True)
 
@@ -95,8 +96,6 @@ noise_scheduler = DDPMScheduler(
 # For diffusers sampling, set timesteps for inference (optionally different inference steps)
 noise_scheduler.set_timesteps(max_timesteps)   # important
 
-T = noise_scheduler.config.num_train_timesteps
-
 # fetch a batch from test dataloader
 batch = next(iter(test_dataloader))
 # dataloader may return (x,y) or x directly
@@ -108,7 +107,7 @@ else:
 x = x.to(device)
 
 # sample timesteps, noise and corrupt images
-timestep = torch.randint(0, T, (x.shape[0],), device=device, dtype=torch.long)
+timestep = torch.randint(0, max_timesteps, (x.shape[0],), device=device, dtype=torch.long)
 noise = torch.randn_like(x, device=device)
 noised_x = noise_scheduler.add_noise(x, noise, timestep)
 
@@ -133,21 +132,39 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 
 # clamp for visualization in [0,1]
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
-
-# generate samples from pure noise (utils.sample_images should return CPU tensor; handle both)
-samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test)
+ema = ExponentialMovingAverage(model, decay=0.9999)
+# generate samples from pure noise (utils.sample_images may return (samples, intermediates))
+ema.apply_shadow(model)            # swap in EMA weights
+samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test, debug=True, save_intermediates=False)
+ema.restore(model)                 # restore original weights after sampling
+# unpack if sample_images returned (samples, intermediates)
+if isinstance(samples, (list, tuple)) and len(samples) >= 1:
+    samples = samples[0]
+else:
+    samples = samples
 if isinstance(samples, np.ndarray):
     samples = torch.from_numpy(samples).float()
 if isinstance(samples, torch.Tensor):
-    # ensure channel-first (N,C,H,W)
-    if samples.ndim == 4 and samples.shape[-1] in (1, 3):
-        # HWC -> CHW
+    # ensure channel-first (N,C,H,W). If HWC, convert to CHW.
+    if samples.ndim == 4 and samples.shape[-1] in (1, 3) and samples.shape[1] not in (1, 3):
         samples = samples.permute(0, 3, 1, 2)
-    samples = samples.cpu().clamp(0.0, 1.0)
-    samples = samples.clip(0.0, 1.0)
+    samples = samples.cpu()
 else:
-    raise TypeError("sample_images must return a numpy array or torch.Tensor")
+    raise TypeError("sample_images must return a numpy array or torch.Tensor (or tuple with samples as first element)")
 
+# ensure samples is on CPU
+samples = samples.cpu()
+
+# DEBUG: show raw range before any mapping
+print("raw samples min/max/mean/std:", float(samples.min()), float(samples.max()), float(samples.mean()), float(samples.std()))
+
+# If your training normalized images to [-1, 1], map back:
+samples = ((samples + 1.0) / 2.0).clamp(0.0, 1.0)
+
+# If your training used [0,1] already, instead use:
+# samples = samples.clamp(0.0, 1.0)
+
+# --- Plotting ---
 def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
     """Make a torchvision grid and return a float32 numpy array.
     If rescale=True normalize to [0,1] using min/max. If rescale=False clip to [0,1]."""
@@ -190,11 +207,67 @@ def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
         arr = np.clip(arr, 0.0, 1.0)
     return arr
 
-# ensure samples is a CPU float32 tensor
-samples = samples.cpu().float()
+# Create figure with 4 stacked rows
+fig, axs = plt.subplots(4, 1, figsize=(10, 12))
 
-# Debug print (remove later)
-print("samples raw min/max/mean/std:", float(samples.min()), float(samples.max()), float(samples.mean()), float(samples.std()))
+axs[0].set_title('Input data(Before noising)', fontsize=10)
+axs[0].imshow(tensor_grid_to_numpy(x.cpu(), nrow=min(8, x.shape[0])), cmap='gray' if in_ch == 1 else None)
+axs[0].axis('off')
+
+axs[1].set_title(f'Corrupted data (timesteps: {timestep.cpu().numpy().tolist()})', fontsize=8)
+axs[1].imshow(tensor_grid_to_numpy(noised_x.cpu(), nrow=min(8, noised_x.shape[0]), rescale=False), cmap='gray')
+axs[1].axis('off')
+
+# visualize predicted noise (map to 0..1 for display) and show compact stats in title
+pred_vis = pred.cpu()
+pred_min = float(pred_vis.min().item())
+pred_max = float(pred_vis.max().item())
+pred_vis = (pred_vis - pred_min) / (pred_max - pred_min + 1e-8)
+
+
+# format timesteps safely (truncate if too long)
+ts_list = timestep.cpu().tolist()
+if len(ts_list) > 20:
+    ts_str = str(ts_list[:pred_vis.shape[0]])[:-1] + "]"
+else:
+    ts_str = str(ts_list)
+
+alpha_cumprod_t = alpha_cumprod[timestep].view(-1,1,1,1)
+sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1.0 - alpha_cumprod_t)
+true_noise = (noised_x - torch.sqrt(alpha_cumprod_t) * x) / (sqrt_one_minus_alpha_cumprod_t + 1e-8)
+mse_eps = torch.mean((pred - true_noise).pow(2)).item()
+print(f"MSE(pred, true_eps) = {mse_eps:.6g}")
+
+# prepare visualization: normalize each sample independently to show structure
+def normalize_per_sample(tensor):
+    # tensor: (N,C,H,W)
+    t = tensor.clone().cpu()
+    N = t.shape[0]
+    out = []
+    for i in range(N):
+        s = t[i]
+        mn, mx = float(s.min()), float(s.max())
+        if mx - mn > 1e-8:
+            out.append((s - mn) / (mx - mn))
+        else:
+            out.append(s - mn)  # all zeros case
+    return torch.stack(out, dim=0)
+
+pred_vis = normalize_per_sample(pred)
+axs[2].set_title(f'Noise Predictions (timesteps: {ts_str})', fontsize=8)
+axs[2].imshow(tensor_grid_to_numpy(pred_vis, nrow=min(8, pred_vis.shape[0]), rescale=False), cmap='gray')
+axs[2].axis('off')
+
+axs[3].set_title('Network Predictions (reconstructed x0)', fontsize=8)
+axs[3].imshow(tensor_grid_to_numpy(denoised_vis, nrow=min(8, denoised_vis.shape[0])), cmap='gray' if in_ch == 1 else None)
+axs[3].axis('off')
+
+plt.subplots_adjust(hspace=0.35)
+os.makedirs("figures", exist_ok=True)
+plt.savefig(f"figures/eval_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+plt.show()
+plt.close()
+
 
 # Auto-detect range and map for plotting:
 smin, smax = float(samples.min()), float(samples.max())
@@ -212,8 +285,8 @@ else:
     samples_vis = (samples - smin) / (smax - smin + 1e-8)
     samples_vis = samples_vis.clamp(0.0, 1.0)
 
-# then continue to plotting using samples_vis
-grid_arr = tensor_grid_to_numpy(samples_vis, nrow=4)
+# Plot generated samples
+grid_arr = tensor_grid_to_numpy(samples, nrow=4)
 plt.figure(figsize=(6, 6))
 plt.title("Generated Samples from Pure Noise", fontsize=14)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
@@ -253,6 +326,18 @@ print("true_noise[0] first 8:", true_noise.view(true_noise.size(0), -1)[0,:8].cp
 print("pred[0] first 8:", pred.view(pred.size(0), -1)[0,:8].cpu().numpy())
 print("x0_pred[0] first 8:", x0_pred.view(x0_pred.size(0), -1)[0,:8].cpu().numpy())
 
+
+
+# ensure samples is a CPU float32 tensor
+samples = samples.cpu().float()
+
+# Debug print (remove later)
+print("samples raw min/max/mean/std:", float(samples.min()), float(samples.max()), float(samples.mean()), float(samples.std()))
+
+
+# Also map denoised_vis similarly if it was computed in [-1,1]:
+# denoised_vis = ((denoised_vis + 1.0) / 2.0).clamp(0.0, 1.0)
+
 # Single-step generation test (debug)
 with torch.no_grad():
     t = torch.tensor([max_timesteps - 1], device=device, dtype=torch.long)  # use last training timestep
@@ -271,4 +356,3 @@ with torch.no_grad():
         x0v = x0v.clamp(0,1)
     print("single-step x0 stats:", float(x0v.min()), float(x0v.max()), float(x0v.mean()), float(x0v.std()))
     torchvision.utils.save_image(x0v, "figures/debug_single_step_x0.png", nrow=1)
-

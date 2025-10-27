@@ -91,11 +91,12 @@ Adjust noise level for proper predictions
 |:--:|
 |![Prediction with custom dataset](image-2.png "Custom dataset")|
 
-|*Evaluation of trained UNET on MNIST dataset*|
+|*Evaluation of trained UNET on MNIST dataset - 10 timesteps*|
 |:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-4.png "Eval on model trained on MNIST")|
 |:--:|
 
-|*Generate images with trained custom UNET*|
+|*Evaluation of trained UNET on MNIST dataset - 1000 timesteps*|
 |:--:|
-|![Generate images with trained custom UNET](image-5.png "Generated image")|
+|![Evaluation of trained UNET on MNIST dataset](image-5.png "Eval on model trained on MNIST")|
+|:--:|

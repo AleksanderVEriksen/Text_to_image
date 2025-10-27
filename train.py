@@ -1,5 +1,5 @@
 from diffusers import DDPMScheduler
-from utils import collate_fn
+from utils import collate_fn, sample_images
 # -----------------------------------------------
 from torch.utils.data import DataLoader, random_split
 import torchvision
@@ -20,6 +20,7 @@ from tqdm import trange
 from torch.amp import autocast, GradScaler
 import argparse
 from data import get_dataset
+from ema import ExponentialMovingAverage
 # Clear cache
 gc.collect()
 torch.cuda.empty_cache()
@@ -31,7 +32,8 @@ autocast_device = "cuda" if device.type == "cuda" else "cpu"
 # Sets scaler
 scaler = GradScaler()
 # ----------------------------------------------
-
+# TODO: Train for 300 epochs
+# ----------------------------------------------
 # *Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Train UNet on MNIST or custom dataset")
@@ -70,7 +72,11 @@ if __name__ == "__main__":
             current_epoch = 0
         
     else:
-        model_name = args.model_name
+        if os.path.isempty('models'):
+            print("No models directory found. Training from scratch.")
+            model_name = "model"
+        else:
+            model_name = args.model_name
 
 
     # *Load dataset from data.py
@@ -106,13 +112,18 @@ if __name__ == "__main__":
         model = UNET(in_channels = 1 if Test else 3, out_channels = 1 if Test else 3).to(device)
     
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
     loss_fn = nn.MSELoss()
     scheduler_lr = lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
     best_loss = float('inf')
+    
+    save_every_epochs = 10
+    sample_every_epochs = 5
+
+    ema = ExponentialMovingAverage(model, decay=0.9999)
 
     if Checkpoint:
-        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}{'_test' if Test else ''}_{current_epoch}.pth")
+        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_{current_epoch}.pth")
         ckpt = torch.load(ckpt_file, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
@@ -121,7 +132,7 @@ if __name__ == "__main__":
         best_loss = ckpt.get("loss", best_loss)
     else:
         # if a pretrained stateless file is expected, map to device; skip if file missing
-        weights_file = os.path.join("models", f"{model_name}{'_test' if Test else ''}.pth")
+        weights_file = os.path.join("models", f"{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}.pth")
         if os.path.exists(weights_file):
             try:
                 model.load_state_dict(torch.load(weights_file, map_location=device))
@@ -178,6 +189,9 @@ if __name__ == "__main__":
                 optimizer.step()
 
             epoch_losses.append(loss.item())
+            optimizer.step()
+            ema.update(model)
+            optimizer.zero_grad()
 
         scheduler_lr.step()
         avg_train_loss = sum(epoch_losses) / max(1, len(epoch_losses))
@@ -208,7 +222,7 @@ if __name__ == "__main__":
         # save best and periodic checkpoints
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
-            best_model_path = os.path.join(save_dir, f"best{'_test' if Test else ''}_model.pth")
+            best_model_path = os.path.join(save_dir, f"best_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_model.pth")
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
@@ -217,8 +231,8 @@ if __name__ == "__main__":
                 "loss": best_loss
             }, best_model_path)
 
-        if (epoch + 1) % 50 == 0:
-            ckpt_path = os.path.join(save_dir, f"{model_name}{'_test' if Test else ''}_{epoch+1}.pth")
+        if (epoch + 1) % save_every_epochs == 0:
+            ckpt_path = os.path.join(save_dir, f"model_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_{current_epoch+epoch+1}.pth")
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
@@ -226,9 +240,22 @@ if __name__ == "__main__":
                 "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
                 "loss": avg_val_loss
             }, ckpt_path)
+            torch.save({
+                "model_state": model.state_dict(),
+                "optimizer_state": optimizer.state_dict(),
+                "ema_state": ema.state_dict(),
+                "epoch": epoch,
+            }, f"checkpoints/ckpt_epoch_{epoch}.pt")
+        # sample and save images for quick inspection
+        if epoch % sample_every_epochs == 0:
+            model.eval()
+            with torch.no_grad():
+                samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=True, debug=False)
+            # save grid
+            torchvision.utils.save_image(samples, f"figures/samples_epoch_{epoch}.png", nrow=4, normalize=True)
 
     print(f"\nBest model saved with loss {best_loss:.4f}")
     print("\nTraining complete.")
 
     # Save the model after training
-    torch.save(model.state_dict(), f"./models/{model_name}{'_test' if Test else ''}.pth") 
+    torch.save(model.state_dict(), f"./models/{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}.pth")
