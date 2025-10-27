@@ -77,7 +77,7 @@ Adjust noise level for proper predictions
 
 ## Tests
 
-|*"Basic UNET - No added timesteps"*|
+|*Basic UNET - No added timesteps*|
 |:--:|
 |![MNIST dataset test on Basic UNET -- Did not predict well due to no added timestep](image.png "Basic UNET - No added timesteps")|
 
