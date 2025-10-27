@@ -87,7 +87,7 @@ Adjust noise level for proper predictions
 
 |*Prediction with Custom dataset*|
 |:--:|
-|![Prediction with cutsom dataset](image-2.png "Custom dataset")|
+|![Prediction with custom dataset](image-2.png "Custom dataset")|
 
 |*Evaluation of trained UNET on MNIST dataset*|
 |:--:|
