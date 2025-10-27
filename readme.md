@@ -33,11 +33,26 @@ Commands to use to run this program. Args for train and eval are not necessary, 
 
 ### Run train
 
-``Commands: python train.py --batch_size(int) --epochs(default 5) --max_timesteps(default 10) --test(include if MNIST dataset) --model(Basic or UNET) --custom_model_name(default model)``
+``Commands: python train.py``
+
+- ``Args:``
+  - ``--batch_size(int)``
+  - ``--epochs(default 5)``
+  - ``--max_timesteps(default 10)``
+  - ``--test(include if MNIST dataset)``
+  - ``--model(Basic or UNET)``
+  - ``--custom_model_name(default model)``
 
 ### Run eval
 
-``Commands: python eval.py --batch_size(int) --max_timesteps(default 10) --test() --model(Basic or UNET)``
+``Commands: python eval.py``
+
+- ``Args:``
+  - ``--batch_size(int)``
+  - ``--max_timesteps(default 10)``
+  - ``--test(include if MNIST dataset)``
+  - ``--model(Basic or UNET)``
+  - ``--custom_model_name(default model)``
 
 ## Goal
 

@@ -18,18 +18,21 @@ else:
 
 
 
-# Parse command line arguments
-parser = argparse.ArgumentParser(description="Train UNet on MNIST or custom dataset")
-parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
-parser.add_argument("--max_timesteps", type=int, default=10, help="Number of timesteps")
-parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
-parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic")
-args = parser.parse_args()
+# *Parse command line arguments
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train UNet on MNIST or custom dataset")
+    parser.add_argument("--batch_size", type=int, default=8, help="Batch size")
+    parser.add_argument("--max_timesteps", type=int, default=10, help="Number of timesteps")
+    parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
+    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic")
+    parser.add_argument("--custom_model_name", type=str, default="model", help="Custom model name for saving")
+    return parser.parse_args()
 # ----------------------------------------------
-
+args = parse_args()
 batch_size = args.batch_size
 max_timesteps = args.max_timesteps
 Test = args.test
+custom_model_name = args.custom_model_name
 
 # Load dataset from data.py
 if Test == False:
@@ -63,10 +66,10 @@ else: model = UNET(in_channels= 1 if Test else 3, out_channels=1 if Test else 3)
 
 if args.test:
     # Load the trained model weights
-    model.load_state_dict(torch.load('models/model_test.pth', weights_only=True))
+    model.load_state_dict(torch.load('models/{custom_model_name}_test.pth', weights_only=True))
 else:
     # Load the trained model weights
-    model.load_state_dict(torch.load('models/model.pth', weights_only=True))
+    model.load_state_dict(torch.load('models/{custom_model_name}.pth', weights_only=True))
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() 

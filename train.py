@@ -43,6 +43,7 @@ def parse_args():
     parser.add_argument("--max_timesteps", type=int, default=10, help="Number of timesteps")
     parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
     parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic")
+    parser.add_argument("--model_name", type=str, default=None, help="Checkpoint model name")
     parser.add_argument("--custom_model_name", type=str, default="model", help="Custom model name for saving")
     return parser.parse_args()
 # ----------------------------------------------
@@ -52,7 +53,11 @@ if __name__ == "__main__":
     num_epochs = args.epochs
     Test = args.test
     max_timesteps = args.max_timesteps
+    model_name = args.model_name if (args.model_name and os.path.exists(f'models/checkpoints/{args.model_name}.pth')) else ''
+    if not model_name:
+        print(f"⚠️ Warning: Model '{args.model_name}' not found in models/checkpoints/. Starting from scratch.")
     custom_model_name = args.custom_model_name
+
 
     # *Load dataset from data.py
     if args.test == False:
@@ -86,6 +91,8 @@ if __name__ == "__main__":
     else:
         model = UNET(in_channels = 1 if Test else 3, out_channels = 1 if Test else 3).to(autocast_device)
     
+    model.load_state_dict(torch.load(f'models/{model_name}.pth', weights_only=True)) if model_name != '' else None
+
     print(f"\nInput channels:  {next(iter(train_dataloader)).size()}\n")
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
@@ -100,6 +107,8 @@ if __name__ == "__main__":
 
     save_dir = "./models/checkpoints"
     os.makedirs(save_dir, exist_ok=True)
+
+    best_loss = float('inf')
 
     # *Training loop
     for epoch in trange(num_epochs):
@@ -123,9 +132,11 @@ if __name__ == "__main__":
             scaler.step(optimizer)
             scaler.update()
 
-        if (epoch + 1) % 50 == 0:
+            current_loss = loss.item()
             print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item():.4f}")
-            checkpoint_path = os.path.join(save_dir, f"{custom_model_name}_epoch_{'test' if Test else ''}_{epoch+1}.pt")
+
+        if (epoch + 1) % 50 == 0:
+            checkpoint_path = os.path.join(save_dir, f"{custom_model_name}_epoch_{'test' if Test else ''}_{epoch+1}.pth")
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
@@ -134,9 +145,42 @@ if __name__ == "__main__":
                 "loss": loss.item()
             }, checkpoint_path)
             print(f"Model checkpoint saved to: {checkpoint_path}")
+        
+        # Validation loop
+        model.eval()
+        val_losses = []
+        with torch.no_grad():
+            for x in val_dataloader:
+                x = x.to(autocast_device)
+                timestep = torch.randint(0, max_timesteps, (x.shape[0],)).to(autocast_device)
+                noise = torch.rand_like(x).to(autocast_device)
+
+                noisy_images = noise_scheduler.add_noise(x, noise, timestep).to(autocast_device)
+
+                with autocast(device_type=autocast_device):
+                    noise_pred = model(noisy_images, timestep)
+                    val_loss = loss_fn(noise_pred, noise)
+
+                val_losses.append(val_loss.item())
+        current_loss = sum(val_losses) / len(val_losses)
+        print(f"Epoch {epoch+1}/{num_epochs}, Validation Loss: {current_loss:.4f}")
+        
+
+
+        # * Find the best model based on loss
+        if current_loss < best_loss:
+            best_loss = current_loss
+            best_loss = current_loss
+            best_model_path = os.path.join(save_dir, f"best_{'test' if Test else 'custom'}_model.pth")
+            torch.save(model.state_dict(), best_model_path)
+            print(f"🌟 New best model saved with loss {best_loss:.4f}")
+
     print("Training complete.")
 
     #TODO: Train for 200 epochs and save model checkpoints every 50 epochs
+    #TODO: Finalize validation loop to monitor overfitting
+    #TODO: Implement learning rate scheduler for better convergence
+    #TODO: Load checkpoints if available to resume training
 
     # Save the model after training
     torch.save(model.state_dict(), f'./models/{custom_model_name}_{'test' if Test else ''}.pth') 
