@@ -1,13 +1,9 @@
 import matplotlib.pyplot as plt
-import numpy as np
+from diffusers import DDPMScheduler
 import torch
 import torchvision
 
-import matplotlib.pyplot as plt
-import torchvision
-import torch
-import numpy as np
-
+# ! Not used - possible removal in future
 def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1):
     """
     normal_images: tensor [B,C,H,W] eller [C,H,W]
@@ -89,34 +85,28 @@ def collate_fn(batch):
 
 
 # Sample generated images
-def sample_images(model, betas, img_size, device, n=16):
-
-    T = len(betas)
-    alphas = 1 - betas
-    alpha_cumprod = torch.cumprod(alphas, dim=0)
-    sqrt_recip_alphas = torch.sqrt(1.0 / alphas)
-    sqrt_one_minus_alpha_cumprod = torch.sqrt(1 - alpha_cumprod)
-
-    x = torch.randn((n, 3, img_size, img_size), device=device)
-
-    for t in reversed(range(T)):
-        t_batch = torch.full((n,), t, device=device, dtype=torch.long)
+# use scheduler.set_timesteps(...) before calling this
+def sample_images(model, scheduler: DDPMScheduler, img_size: int, device, n: int = 16, Test: bool = False, debug: bool = False):
+    """
+    Use diffusers scheduler for sampling. Call scheduler.set_timesteps(num_inference_steps)
+    before calling this function. Returns CPU tensor (n,C,H,W).
+    """
+    model.eval()
+    channels = 1 if Test else 3
+    x = torch.randn((n, channels, img_size, img_size), device=device)
+    # scheduler.timesteps must be set by caller (scheduler.set_timesteps)
+    noise_scheduler = scheduler(num_train_timesteps=scheduler.config.num_train_timesteps, beta_start=scheduler.config.beta_start, beta_end=scheduler.config.beta_end)
+    noise_scheduler.set_timesteps(scheduler.config.num_train_timesteps)
+    timesteps = list(scheduler.timesteps)   # descending
+    for i, t in enumerate(timesteps):
+        t_int = int(t)
+        t_batch = torch.full((n,), t_int, device=device, dtype=torch.long)
         with torch.no_grad():
-            predicted_noise = model(x, t_batch)
+            eps_pred = model(x, t_batch)
+        out = scheduler.step(model_output=eps_pred, timestep=t_int, sample=x)
+        x = out.prev_sample if hasattr(out, "prev_sample") else out["prev_sample"]
 
-        coef1 = sqrt_recip_alphas[t]
-        coef2 = sqrt_one_minus_alpha_cumprod[t]
-
-        x0_pred = (x - coef2 * predicted_noise) / coef1
-
-        if t > 0:
-            noise = torch.randn_like(x)
-            beta_t = betas[t]
-            alpha_t = alphas[t]
-            alpha_cumprod_t = alpha_cumprod[t]
-            sigma_t = torch.sqrt(beta_t * (1 - alpha_cumprod_t) / (1 - alpha_t))
-            x = torch.sqrt(alpha_t) * x0_pred + sigma_t * noise
-        else:
-            x = x0_pred
-        
-        return x  # Returner de genererte bildene
+        if debug:
+            print(f"step {i}/{len(timesteps)-1} t={t_int} | x stats min/max/mean/std:",
+                float(x.min()), float(x.max()), float(x.mean()), float(x.std()))
+    return x.cpu()

@@ -36,23 +36,25 @@ Commands to use to run this program. Args for train and eval are not necessary, 
 ``Commands: python train.py``
 
 - ``Args:``
-  - ``--batch_size(int)``
+  - ``--batch_size(default 32)``
   - ``--epochs(default 5)``
-  - ``--max_timesteps(default 10)``
+  - ``--max_timesteps(default 1000)``
   - ``--test(include if MNIST dataset)``
-  - ``--model(Basic or UNET)``
-  - ``--custom_model_name(default model)``
+  - ``--checkpoint(if the model used is from a checkpoint)``
+  - ``--model(If using Basic UNET)``
+  - ``--model_name(default model)``
 
 ### Run eval
 
 ``Commands: python eval.py``
 
 - ``Args:``
-  - ``--batch_size(int)``
-  - ``--max_timesteps(default 10)``
+  - ``--batch_size(default 32)``
+  - ``--max_timesteps(default 1000)``
   - ``--test(include if MNIST dataset)``
-  - ``--model(Basic or UNET)``
-  - ``--custom_model_name(default model)``
+  - ``--checkpoint(if the model used is from a checkpoint)``
+  - ``--model(if using Basic UNET)``
+  - ``--model_name(default model)``
 
 ## Goal
 
@@ -91,9 +93,9 @@ Adjust noise level for proper predictions
 
 |*Evaluation of trained UNET on MNIST dataset*|
 |:--:|
-|![Evaluation of trained UNET on MNIST dataset](image-3.png "Eval on model trained on MNIST")|
+|![Evaluation of trained UNET on MNIST dataset](image-4.png "Eval on model trained on MNIST")|
 |:--:|
 
 |*Generate images with trained custom UNET*|
 |:--:|
-|![Generate images with trained custom UNET]( "Generated image")|
+|![Generate images with trained custom UNET](image-5.png "Generated image")|
