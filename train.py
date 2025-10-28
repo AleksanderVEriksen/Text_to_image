@@ -32,7 +32,7 @@ autocast_device = "cuda" if device.type == "cuda" else "cpu"
 # Sets scaler
 scaler = GradScaler()
 # ----------------------------------------------
-# TODO: Train for 300 epochs
+# TODO: Train for another 100 epochs on fresh model. Evaluate ema model also
 # ----------------------------------------------
 # *Parse command line arguments
 def parse_args():
@@ -53,6 +53,7 @@ if __name__ == "__main__":
     Test = args.test
     max_timesteps = args.max_timesteps
     Checkpoint = args.checkpoint
+    current_epoch = 0
     if Checkpoint:
         if not args.model_name:
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
@@ -68,12 +69,17 @@ if __name__ == "__main__":
         if m:
             current_epoch = int(m.group(1) or m.group(2))
             print(f"Resuming training from epoch {current_epoch}")
+            num_epochs = num_epochs - current_epoch
         else:
             current_epoch = 0
         
     else:
-        if os.path.isempty('models'):
+        if not os.path.exists('models'):
             print("No models directory found. Training from scratch.")
+            os.makedirs('models', exist_ok=True)
+            model_name = args.model_name
+        if os.path.exists('model') and not os.path.listdir('models'):
+            print("Models directory is empty. Training from scratch.")
             model_name = "model"
         else:
             model_name = args.model_name
@@ -123,16 +129,17 @@ if __name__ == "__main__":
     ema = ExponentialMovingAverage(model, decay=0.9999)
 
     if Checkpoint:
-        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_{current_epoch}.pth")
+        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}.pth")
         ckpt = torch.load(ckpt_file, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
         scaler.load_state_dict(ckpt.get("scaler_state_dict", {}))
+        ema.load_state_dict(ckpt.get("ema_state", {}))
         start_epoch = ckpt.get("epoch", 0)
         best_loss = ckpt.get("loss", best_loss)
     else:
         # if a pretrained stateless file is expected, map to device; skip if file missing
-        weights_file = os.path.join("models", f"{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}.pth")
+        weights_file = os.path.join("models", f"{model_name}_Batch_size_{batch_size}_Max_timesteps_{max_timesteps}{'_test' if Test else ''}.pth")
         if os.path.exists(weights_file):
             try:
                 model.load_state_dict(torch.load(weights_file, map_location=device))
@@ -159,7 +166,9 @@ if __name__ == "__main__":
     T = noise_scheduler.config.num_train_timesteps
 
     # *Training loop
-    for epoch in trange(num_epochs):
+    torch.autograd.set_detect_anomaly(False)   # enable True only when debugging
+    global_step = 0
+    for epoch in range(num_epochs):
         model.train()
         epoch_losses = []
         for batch in train_dataloader:
@@ -169,16 +178,18 @@ if __name__ == "__main__":
 
             timestep = torch.randint(0, T, (x.shape[0],), device=device, dtype=torch.long)
             noise = torch.randn_like(x, device=device)
-            # *Add noise to the images according to the noise magnitude at each timestep
             noisy_images = noise_scheduler.add_noise(x, noise, timestep)
-            # *Predict the noise using the model - the model learns to denoise
+
             optimizer.zero_grad()
             if device.type == "cuda":
                 # mixed precision only on CUDA
                 with autocast("cuda"):
                     noise_pred = model(noisy_images, timestep)
                     loss = loss_fn(noise_pred, noise)
+                # scale, backward, then unscale to clip grads safely
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 scaler.step(optimizer)
                 scaler.update()
             else:
@@ -186,11 +197,28 @@ if __name__ == "__main__":
                 noise_pred = model(noisy_images, timestep)
                 loss = loss_fn(noise_pred, noise)
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
 
+            # detect NaN/Inf loss
+            if torch.isnan(loss) or torch.isinf(loss):
+                print("NaN/Inf loss at step", global_step, "epoch", epoch)
+                torch.save(model.state_dict(), f"bad_state_step_{global_step}.pt")
+                raise RuntimeError("Stopping: loss became NaN/Inf")
+
+            # detect NaN outputs from model (run on a small forward, no grad)
+            with torch.no_grad():
+                out = model(noisy_images, timestep)
+                if torch.isnan(out).any():
+                    print("NaN in model output; stopping.")
+                    torch.save(model.state_dict(), f"bad_model_out_{global_step}.pt")
+                    raise RuntimeError("NaN in model output")
+
             epoch_losses.append(loss.item())
-            optimizer.step()
+
+            # EMA update should happen AFTER a successful optimizer.step()
             ema.update(model)
+            global_step += 1
             optimizer.zero_grad()
 
         scheduler_lr.step()
@@ -222,40 +250,53 @@ if __name__ == "__main__":
         # save best and periodic checkpoints
         if avg_val_loss < best_loss:
             best_loss = avg_val_loss
-            best_model_path = os.path.join(save_dir, f"best_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_model.pth")
+            best_model_path = os.path.join(save_dir, f"best_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}_model.pth")
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
+                "ema_state": ema.state_dict(),
                 "loss": best_loss
             }, best_model_path)
 
         if (epoch + 1) % save_every_epochs == 0:
-            ckpt_path = os.path.join(save_dir, f"model_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}_{current_epoch+epoch+1}.pth")
+            ckpt_path = os.path.join(save_dir, f"model_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}_{current_epoch+epoch+1}.pth")
             torch.save({
                 "epoch": epoch + 1,
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
+                "ema_state": ema.state_dict(),
                 "loss": avg_val_loss
             }, ckpt_path)
-            torch.save({
-                "model_state": model.state_dict(),
-                "optimizer_state": optimizer.state_dict(),
-                "ema_state": ema.state_dict(),
-                "epoch": epoch,
-            }, f"checkpoints/ckpt_epoch_{epoch}.pt")
         # sample and save images for quick inspection
         if epoch % sample_every_epochs == 0:
             model.eval()
             with torch.no_grad():
+                ema.apply_shadow(model)
                 samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=True, debug=False)
+                ema.restore(model)
+                # sample_images may return (samples, intermediates) or a tensor/ndarray
+                if isinstance(samples, (list, tuple)):
+                    samples = samples[0]
             # save grid
-            torchvision.utils.save_image(samples, f"figures/samples_epoch_{epoch}.png", nrow=4, normalize=True)
+            os.makedirs("figures/samples", exist_ok=True)
+            torchvision.utils.save_image(samples, f"figures/samples/samples_epoch_{epoch}.png", nrow=4, normalize=True)
 
     print(f"\nBest model saved with loss {best_loss:.4f}")
     print("\nTraining complete.")
 
     # Save the model after training
-    torch.save(model.state_dict(), f"./models/{model_name}_{'Batch_size_', batch_size}_{'Max_timesteps_', max_timesteps}{'_test' if Test else ''}.pth")
+    torch.save(model.state_dict(), f"./models/{model_name}_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
+
+    # Save EMA state plus a copy of the model with EMA weights applied
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "ema_state": ema.state_dict(),
+    }, f"./models/{model_name}_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
+
+    # Also save a separate file with EMA weights applied to the model (for easy inference)
+    ema.apply_shadow(model)
+    torch.save(model.state_dict(), f"./models/{model_name}_EMA_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
+    ema.restore(model)

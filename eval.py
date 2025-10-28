@@ -16,8 +16,6 @@ import os
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 autocast_device = "cuda" if device.type == "cuda" else "cpu"
 
-
-
 # *Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Train UNet on MNIST or custom dataset")
@@ -77,15 +75,27 @@ out_ch = 1 if Test else 3
 model = BasicUNet(in_channels=in_ch, out_channels=out_ch).to(device) if args.model == "Basic" \
         else UNET(in_channels=in_ch, out_channels=out_ch).to(device)
 
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
+loss_fn = nn.MSELoss() # L2 loss for noise prediction
+scaler = torch.amp.GradScaler(enabled=(device.type == "cuda"))
+ema = ExponentialMovingAverage(model, decay=0.9999)
+
 if Test:
-    # Load the trained model weights
-    model.load_state_dict(torch.load(f"models/{model_name}_test.pth", weights_only=True))
+    if Checkpoint:
+        # Load from checkpoint
+        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}.pth")
+        ckpt = torch.load(ckpt_file, map_location=device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
+        ema.load_state_dict(ckpt.get("ema_state", {}))
+    else:
+        # Load the trained model weights
+        model.load_state_dict(torch.load(f"models/{model_name}.pth", weights_only=True))
 else:
     # Load the trained model weights
     model.load_state_dict(torch.load(f"models/{model_name}.pth", weights_only=True))
 
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
-loss_fn = nn.MSELoss() 
+
 
 # Configurate the noise scheduler
 noise_scheduler = DDPMScheduler(
@@ -132,7 +142,6 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 
 # clamp for visualization in [0,1]
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
-ema = ExponentialMovingAverage(model, decay=0.9999)
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
 ema.apply_shadow(model)            # swap in EMA weights
 samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test, debug=True, save_intermediates=False)
@@ -231,12 +240,6 @@ if len(ts_list) > 20:
     ts_str = str(ts_list[:pred_vis.shape[0]])[:-1] + "]"
 else:
     ts_str = str(ts_list)
-
-alpha_cumprod_t = alpha_cumprod[timestep].view(-1,1,1,1)
-sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1.0 - alpha_cumprod_t)
-true_noise = (noised_x - torch.sqrt(alpha_cumprod_t) * x) / (sqrt_one_minus_alpha_cumprod_t + 1e-8)
-mse_eps = torch.mean((pred - true_noise).pow(2)).item()
-print(f"MSE(pred, true_eps) = {mse_eps:.6g}")
 
 # prepare visualization: normalize each sample independently to show structure
 def normalize_per_sample(tensor):
