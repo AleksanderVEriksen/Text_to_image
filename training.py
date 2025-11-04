@@ -3,7 +3,7 @@ import torch
 from torch.cuda.amp import autocast
 
 
-def train_epoch(model, dataloader, optimizer, scheduler, noise_scheduler, loss_fn, 
+def train_epoch(model, dataloader, optimizer, noise_scheduler, loss_fn, 
                 device, scaler, epoch, num_epochs):
     """Single epoch training function"""
     model.train()

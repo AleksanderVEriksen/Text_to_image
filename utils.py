@@ -5,6 +5,8 @@ import torchvision
 from torchvision import transforms
 import PIL.Image
 from tqdm.auto import tqdm
+import numpy as np
+import os
 
 # ! Not used - possible removal in future
 def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1):
@@ -135,42 +137,32 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
     """Generate images using the diffusion model."""
     model.eval()
     
-    # Set up initial noise
-    channels = 1 if Test else 3
-    x = torch.randn((n, channels, img_size, img_size), device=device)
+    # Start with black noise (negative values) instead of random noise
+    x = -torch.abs(torch.randn((n, 1 if Test else 3, img_size, img_size), device=device))
     
-    # Convert labels to tensor
-    if labels is not None:
-        if isinstance(labels, (str, int)):
-            # Single label -> convert and repeat
-            label_idx = text_to_label(labels, num_classes)
-            labels = torch.full((n,), label_idx, dtype=torch.long, device=device)
-        elif isinstance(labels, (list, tuple)):
-            # List of labels -> convert each and create tensor
-            label_indices = [text_to_label(l, num_classes) for l in labels]
-            labels = torch.tensor(label_indices, dtype=torch.long, device=device)
-            if len(labels) < n:
-                labels = labels.repeat(n // len(labels) + 1)[:n]
-        elif isinstance(labels, torch.Tensor):
-            labels = labels.to(device)
-        else:
-            raise TypeError(f"Unsupported label type: {type(labels)}")
+    if debug:
+        print("\nSampling Progress:")
+        print("-" * 50)
     
     # Sampling loop
     for t in scheduler.timesteps:
         with torch.no_grad():
-            # Get model prediction
             noise_pred = model(x, t.expand(n).to(device), labels)
-            
-            # Update sample with scheduler
             step_output = scheduler.step(noise_pred, t, x)
             x = step_output.prev_sample
             
-            if debug:
-                print(f"Step {t}: x range [{x.min():.3f}, {x.max():.3f}]")
+            # Ensure values stay mostly negative for black appearance
+            x = x - x.mean(dim=(2,3), keepdim=True)
+            
+            if debug and t % 20 == 0:
+                print(f"Step {t:3d}/{scheduler.timesteps[0]}: min={x.min():6.3f}, max={x.max():6.3f}")
     
-    # Ensure output is in [-1, 1]
-    x = torch.clamp(x, -1, 1)
+    if debug:
+        print("-" * 50)
+        print(f"Final range: [{x.min():6.3f}, {x.max():6.3f}]")
+    
+    # Ensure final output has proper contrast
+    x = torch.tanh(x)  # Squash to [-1, 1]
     return x.cpu()
 
 
@@ -209,3 +201,116 @@ def validate(model, val_dataloader, noise_scheduler, loss_fn, device, max_batche
             batches += 1
             
     return val_loss / batches, running_avg_loss
+
+def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
+    """Make a torchvision grid and return a float32 numpy array.
+    If rescale=True normalize to [0,1] using min/max. If rescale=False clip to [0,1]."""
+    # Accept either torch.Tensor or numpy array
+    if isinstance(tensor, np.ndarray):
+        arr = tensor
+        # If HWC -> CHW expectation already handled outside; ensure float32
+        arr = arr.astype(np.float32)
+        # If array is HWC single-channel -> squeeze last dim
+        if arr.ndim == 3 and arr.shape[2] == 1:
+            arr = arr[:, :, 0]
+        # Rescale or clip
+        mn, mx = float(arr.min()), float(arr.max())
+        if rescale:
+            if mn < 0.0 or mx > 1.0:
+                if mx - mn > 1e-8:
+                    arr = (arr - mn) / (mx - mn)
+                else:
+                    arr = np.clip(arr, 0.0, 1.0)
+        else:
+            arr = np.clip(arr, 0.0, 1.0)
+        return arr
+# torch.Tensor path
+    grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=False, pad_value=1)
+    # move to CPU, ensure float32
+    grid = grid.detach().cpu().to(torch.float32)
+    arr = grid.permute(1, 2, 0).numpy().astype(np.float32)
+    # if single-channel, squeeze last dim
+    if arr.shape[2] == 1:
+        arr = arr[:, :, 0]
+    # Rescale to [0,1] if necessary
+    mn, mx = float(arr.min()), float(arr.max())
+    if rescale:
+        if mn < 0.0 or mx > 1.0:
+            if mx - mn > 1e-8:
+                arr = (arr - mn) / (mx - mn)
+            else:
+                arr = np.clip(arr, 0.0, 1.0)
+    else:
+        arr = np.clip(arr, 0.0, 1.0)
+    return arr
+
+def normalize_per_sample(tensor, min_val=-1, max_val=1):
+    """Normalize each sample in a batch independently to a given range.
+    
+    Args:
+        tensor (torch.Tensor): Input tensor of shape (N,C,H,W)
+        min_val (float): Target minimum value
+        max_val (float): Target maximum value
+    
+    Returns:
+        torch.Tensor: Normalized tensor
+    """
+    if not isinstance(tensor, torch.Tensor):
+        raise TypeError("Input must be a PyTorch tensor")
+        
+    # Get dimensions
+    B, C, H, W = tensor.shape
+    
+    # Reshape to (B,C*H*W) for per-sample normalization
+    flat = tensor.view(B, -1)
+    
+    # Get min/max per sample
+    min_per_sample = flat.min(dim=1, keepdim=True)[0]
+    max_per_sample = flat.max(dim=1, keepdim=True)[0]
+    
+    # Normalize
+    scale = (max_val - min_val) / (max_per_sample - min_per_sample + 1e-8)
+    normalized = (flat - min_per_sample) * scale + min_val
+    
+    # Reshape back
+    return normalized.view(B, C, H, W)
+
+def load_model_weights(model, model_name, device, is_test=False, is_checkpoint=False, is_ema=False):
+    """Load model weights with proper error handling and path resolution.
+    
+    Args:
+        model: The PyTorch model to load weights into
+        model_name (str): Name of the model/weights file
+        device: PyTorch device to load weights to
+        is_test (bool): If True, look in test model directory
+        is_checkpoint (bool): If True, load from checkpoints folder
+        is_ema (bool): If True, load EMA weights
+    
+    Returns:
+        dict or None: Full checkpoint dict if available, else None
+    """
+    # Determine weight path
+    if is_checkpoint:
+        path = os.path.join("models", "checkpoints", f"{model_name}.pth")
+    elif is_ema:
+        path = os.path.join("models", "EMA", f"{model_name}_EMA.pth")
+    else:
+        path = os.path.join("models", f"{model_name}.pth")
+    
+    try:
+        checkpoint = torch.load(path, map_location=device)
+        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
+            model.load_state_dict(checkpoint["model_state_dict"])
+            print(f"Loaded model state from checkpoint: {path}")
+            return checkpoint
+        else:
+            model.load_state_dict(checkpoint)
+            print(f"Loaded model weights from: {path}")
+            return None
+            
+    except FileNotFoundError:
+        print(f"No weights found at {path}")
+        return None
+    except Exception as e:
+        print(f"Error loading weights from {path}: {str(e)}")
+        return None

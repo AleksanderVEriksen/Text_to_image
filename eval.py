@@ -7,7 +7,7 @@ import numpy as np
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
-from utils import collate_fn, sample_images
+from utils import collate_fn, sample_images, tensor_grid_to_numpy, normalize_per_sample, load_model_weights
 from ema import ExponentialMovingAverage
 import argparse
 import sys
@@ -95,55 +95,21 @@ loss_fn = nn.MSELoss() # L2 loss for noise prediction
 scaler = torch.amp.GradScaler(enabled=(device.type == "cuda"))
 ema = ExponentialMovingAverage(model, decay=0.9999)
 
-if Test:
-    if Checkpoint:
-        # Load from checkpoint
-        ckpt_file = os.path.join("models", "checkpoints", f"{model_name}.pth")
-        ckpt = torch.load(ckpt_file, map_location=device)
-        # Load only the model state dict from the checkpoint
-        model.load_state_dict(ckpt["model_state_dict"])
-        optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
-        ema.load_state_dict(ckpt.get("ema_state", {}))
-    elif EMA:
-        # Load from EMA checkpoint
-        ckpt_file = os.path.join("models", "EMA", f"{model_name}_EMA_BS_{batch_size}.pth")
-        ckpt = torch.load(ckpt_file, map_location=device)
-        model.load_state_dict(ckpt)
-    else:
-        # Load the trained model weights
-        weights_file = os.path.join("models", f"{model_name}.pth")
-        try:
-            # Try loading as a full checkpoint first
-            ckpt = torch.load(weights_file, map_location=device)
-            if "model_state_dict" in ckpt:
-                model.load_state_dict(ckpt["model_state_dict"])
-            else:
-                # If not a checkpoint, try loading as direct state dict
-                model.load_state_dict(ckpt)
-        except Exception as e:
-            print(f"Error loading model weights: {str(e)}")
-            sys.exit(1)
-else:
-    # Load the trained model weights for non-test case
-    file_p = os.path.join("models", f"{model_name}.pth")
-    try:
-        ckpt = torch.load(file_p, map_location=device)
-        if "model_state_dict" in ckpt:
-            model.load_state_dict(ckpt["model_state_dict"])
-            optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
-            ema.load_state_dict(ckpt.get("ema_state", {}))
-        else:
-            model.load_state_dict(ckpt)
-    except Exception as e:
-        print(f"Error loading model weights: {str(e)}")
-        sys.exit(1)
+
+# Then use it (replace both loading blocks with):
+checkpoint = load_model_weights(model, model_name, device, Test, Checkpoint, EMA)
+if checkpoint is not None:
+    optimizer.load_state_dict(checkpoint.get("optimizer_state_dict", {}))
+    ema.load_state_dict(checkpoint.get("ema_state", {}))
 
 # Configurate the noise scheduler
-noise_scheduler = DDPMScheduler(
-    num_train_timesteps=max_timesteps,
-    beta_start=0.0001,
-    beta_end=0.02,
-)
+    noise_scheduler = DDPMScheduler(
+        num_train_timesteps=max_timesteps,
+        beta_schedule="scaled_linear",
+        beta_start=0.0001,
+        beta_end=0.02,
+        clip_sample=True
+    )
 # For diffusers sampling, set timesteps for inference (optionally different inference steps)
 noise_scheduler.set_timesteps(max_timesteps)   # important
 
@@ -151,7 +117,7 @@ noise_scheduler.set_timesteps(max_timesteps)   # important
 batch = next(iter(test_dataloader))
 # dataloader may return (x,y) or x directly
 if isinstance(batch, (list, tuple)):
-    x = batch[0]
+    x, labels = batch
 else:
     x = batch
 # ensure tensor and move to device
@@ -174,7 +140,7 @@ with torch.no_grad():
     # if test loader yields labels, pass them in; otherwise leave None
     labels_for_batch = None
     if isinstance(batch, (list, tuple)) and len(batch) > 1:
-        labels_for_batch = batch[1]
+        labels_for_batch = labels
     pred = model(noised_x, timestep, labels_for_batch.to(device) if labels_for_batch is not None else None)
 
 # reconstruct x0 estimate from predicted noise
@@ -189,77 +155,25 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
 ema.apply_shadow(model)            # swap in EMA weights
-samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test, debug=True)
+samples = sample_images(
+    model, 
+    noise_scheduler, 
+    img_size=28, 
+    device=device, 
+    n=16, 
+    Test=Test, 
+    debug=True, 
+    labels=torch.arange(10).repeat(2)[:16],
+    num_classes=num_classes)
 ema.restore(model)                 # restore original weights after sampling
-# unpack if sample_images returned (samples, intermediates)
-if isinstance(samples, (list, tuple)) and len(samples) >= 1:
-    samples = samples[0]
-else:
-    pass
-if isinstance(samples, np.ndarray):
-    samples = torch.from_numpy(samples).float()
-if isinstance(samples, torch.Tensor):
-    # ensure channel-first (N,C,H,W). If HWC, convert to CHW.
-    if samples.ndim == 4 and samples.shape[-1] in (1, 3) and samples.shape[1] not in (1, 3):
-        samples = samples.permute(0, 3, 1, 2)
-    samples = samples.cpu()
-else:
-    raise TypeError("sample_images must return a numpy array or torch.Tensor (or tuple with samples as first element)")
 
 # ensure samples is on CPU
 samples = samples.cpu()
 
-# DEBUG: show raw range before any mapping
-print("raw samples min/max/mean/std:", float(samples.min()), float(samples.max()), float(samples.mean()), float(samples.std()))
-
 # If your training normalized images to [-1, 1], map back:
 samples = ((samples + 1.0) / 2.0).clamp(0.0, 1.0)
 
-# If your training used [0,1] already, instead use:
-# samples = samples.clamp(0.0, 1.0)
-
 # --- Plotting ---
-def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
-    """Make a torchvision grid and return a float32 numpy array.
-    If rescale=True normalize to [0,1] using min/max. If rescale=False clip to [0,1]."""
-    # Accept either torch.Tensor or numpy array
-    if isinstance(tensor, np.ndarray):
-        arr = tensor
-        # If HWC -> CHW expectation already handled outside; ensure float32
-        arr = arr.astype(np.float32)
-        # If array is HWC single-channel -> squeeze last dim
-        if arr.ndim == 3 and arr.shape[2] == 1:
-            arr = arr[:, :, 0]
-        # Rescale or clip
-        mn, mx = float(arr.min()), float(arr.max())
-        if rescale:
-            if mn < 0.0 or mx > 1.0:
-                if mx - mn > 1e-8:
-                    arr = (arr - mn) / (mx - mn)
-                else:
-                    arr = np.clip(arr, 0.0, 1.0)
-        else:
-            arr = np.clip(arr, 0.0, 1.0)
-        return arr
-# torch.Tensor path
-    grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=False, pad_value=1)
-    # move to CPU, ensure float32
-    grid = grid.detach().cpu().to(torch.float32)
-    arr = grid.permute(1, 2, 0).numpy().astype(np.float32)
-    # if single-channel, squeeze last dim
-    if arr.shape[2] == 1:
-        arr = arr[:, :, 0]
-    # Rescale to [0,1] if necessary
-    mn, mx = float(arr.min()), float(arr.max())
-    if rescale:
-        if mn < 0.0 or mx > 1.0:
-            if mx - mn > 1e-8:
-                arr = (arr - mn) / (mx - mn)
-            else:
-                arr = np.clip(arr, 0.0, 1.0)
-    else:
-        arr = np.clip(arr, 0.0, 1.0)
-    return arr
 
 # Create figure with 4 stacked rows
 fig, axs = plt.subplots(4, 1, figsize=(10, 12))
@@ -285,21 +199,6 @@ if len(ts_list) > 20:
     ts_str = str(ts_list[:pred_vis.shape[0]])[:-1] + "]"
 else:
     ts_str = str(ts_list)
-
-# prepare visualization: normalize each sample independently to show structure
-def normalize_per_sample(tensor):
-    # tensor: (N,C,H,W)
-    t = tensor.clone().cpu()
-    N = t.shape[0]
-    out = []
-    for i in range(N):
-        s = t[i]
-        mn, mx = float(s.min()), float(s.max())
-        if mx - mn > 1e-8:
-            out.append((s - mn) / (mx - mn))
-        else:
-            out.append(s - mn)  # all zeros case
-    return torch.stack(out, dim=0)
 
 pred_vis = normalize_per_sample(pred)
 axs[2].set_title(f'Noise Predictions (timesteps: {ts_str})', fontsize=8)
@@ -334,7 +233,7 @@ else:
     samples_vis = samples_vis.clamp(0.0, 1.0)
 
 # Plot generated samples
-grid_arr = tensor_grid_to_numpy(samples, nrow=4)
+grid_arr = tensor_grid_to_numpy(samples_vis, nrow=min(8, samples_vis.shape[0]))
 plt.figure(figsize=(6, 6))
 plt.title("Generated Samples from Pure Noise", fontsize=14)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
@@ -343,54 +242,13 @@ plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'c
 plt.show()
 plt.close()
 
-# Also map denoised_vis similarly if it was computed in [-1,1]:
-# denoised_vis = ((denoised_vis + 1.0) / 2.0).clamp(0.0, 1.0)
-
-# Debug prints: inspect tensors before visualization
-print("model device:", next(model.parameters()).device)
-print("noised_x stats:", tuple(float(x) for x in (noised_x.min(), noised_x.max(), noised_x.mean(), noised_x.std())))
-print("pred stats:", tuple(float(x) for x in (pred.min(), pred.max(), pred.mean(), pred.std())))
-print("x0_pred stats:", tuple(float(x) for x in (x0_pred.min(), x0_pred.max(), x0_pred.mean(), x0_pred.std())))
-print("samples stats (after sampling):", tuple(float(x) for x in (samples.min(), samples.max(), samples.mean(), samples.std())))
-# Also print a small sample of pixel values
-print("samples[0] first 10 pixels:", samples.view(samples.size(0), -1)[0, :10].cpu().numpy())
-
-# --- debug checks: predict-type + scheduler consistency ---
-print("noise_scheduler.config.num_train_timesteps:", noise_scheduler.config.num_train_timesteps)
-print("scheduler.timesteps (len):", len(list(noise_scheduler.timesteps)), "first/last:", list(noise_scheduler.timesteps)[:3], list(noise_scheduler.timesteps)[-3:])
-
-# compute true_noise for the batch (we have original x and noised_x)
-alpha_cumprod_t = alpha_cumprod[timestep].view(-1,1,1,1)
-sqrt_one_minus_alpha_cumprod_t = torch.sqrt(1.0 - alpha_cumprod_t)
-sqrt_alpha_cumprod_t = torch.sqrt(alpha_cumprod_t)
-true_noise = (noised_x - sqrt_alpha_cumprod_t * x) / (sqrt_one_minus_alpha_cumprod_t + 1e-8)
-
-mse_eps = torch.mean((pred - true_noise).pow(2)).item()
-mse_x0 = torch.mean((pred - x).pow(2)).item()
-print(f"MSE(pred, true_eps) = {mse_eps:.6g}, MSE(pred, x_clean) = {mse_x0:.6g}")
-
-# sanity: print small sample comparisons
-print("true_noise[0] first 8:", true_noise.view(true_noise.size(0), -1)[0,:8].cpu().numpy())
-print("pred[0] first 8:", pred.view(pred.size(0), -1)[0,:8].cpu().numpy())
-print("x0_pred[0] first 8:", x0_pred.view(x0_pred.size(0), -1)[0,:8].cpu().numpy())
-
-
-
-# ensure samples is a CPU float32 tensor
-samples = samples.cpu().float()
-
-# Debug print (remove later)
-print("samples raw min/max/mean/std:", float(samples.min()), float(samples.max()), float(samples.mean()), float(samples.std()))
-
-
-# Also map denoised_vis similarly if it was computed in [-1,1]:
-# denoised_vis = ((denoised_vis + 1.0) / 2.0).clamp(0.0, 1.0)
-
 # Single-step generation test (debug)
 with torch.no_grad():
     t = torch.tensor([max_timesteps - 1], device=device, dtype=torch.long)  # use last training timestep
     x = torch.randn((1, in_ch, 28, 28), device=device)
-    eps = model(x, t)
+    # Add label for conditioning (e.g., generate digit 5)
+    label = torch.tensor([5], device=device)  # Change number as needed
+    eps = model(x, t, labels=label)
     # reuse alpha_cumprod from above
     alpha_t = alpha_cumprod[t].view(-1,1,1,1)
     sqrt_one_minus_alpha = torch.sqrt(1.0 - alpha_t)
