@@ -1,5 +1,7 @@
 from diffusers import DDPMScheduler
-from utils import collate_fn, sample_images
+from tqdm.auto import tqdm  # Replace existing tqdm import
+from utils import collate_fn, sample_images, validate
+from training import train_epoch
 # -----------------------------------------------
 from torch.utils.data import DataLoader, random_split
 import torchvision
@@ -41,7 +43,8 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=5, help="Number of epochs")
     parser.add_argument("--max_timesteps", type=int, default=1000, help="Number of timesteps")
     parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
-    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic")
+    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
+    parser.add_argument("--num_classes", type=int, default=10, help="Number of label classes for label embedding")
     parser.add_argument("--checkpoint", action="store_true", help="Use a checkpoint to resume training")
     parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
     return parser.parse_args()
@@ -51,6 +54,7 @@ if __name__ == "__main__":
     batch_size = args.batch_size
     num_epochs = args.epochs
     Test = args.test
+    num_classes = args.num_classes
     max_timesteps = args.max_timesteps
     Checkpoint = args.checkpoint
     current_epoch = 0
@@ -113,18 +117,24 @@ if __name__ == "__main__":
 
     # *Create the UNET model
     if args.model == "Basic":
-        model = BasicUNet(in_channels=1, out_channels=1).to(device)
+        model = BasicUNet(in_channels=1, out_channels=1, num_classes=num_classes).to(device)
     else:
-        model = UNET(in_channels = 1 if Test else 3, out_channels = 1 if Test else 3).to(device)
+        model = UNET(in_channels = 1 if Test else 3, out_channels = 1 if Test else 3, num_classes=num_classes).to(device)
     
 
-    optimizer = torch.optim.Adam(model.parameters(), lr=5e-5)
+    optimizer = torch.optim.Adam(model.parameters(), 
+                                lr=5e-5,
+                                weight_decay=0.01,
+                                betas=(0.9, 0.999))
     loss_fn = nn.MSELoss()
-    scheduler_lr = lr_scheduler.StepLR(optimizer, step_size=50, gamma=0.1)
+    scheduler_lr = lr_scheduler.CosineAnnealingLR(
+                                    optimizer, 
+                                    T_max=num_epochs,
+                                    eta_min=1e-6)
     best_loss = float('inf')
     
-    save_every_epochs = 10
-    sample_every_epochs = 5
+    save_every_epochs = 5
+    sample_every_epochs = 2
 
     ema = ExponentialMovingAverage(model, decay=0.9999)
 
@@ -148,14 +158,24 @@ if __name__ == "__main__":
                 pass
         start_epoch = 0
 
-    print(f"\nInput channels:  {next(iter(train_dataloader)).size()}\n")
+    # show a sample batch shape (collate_fn returns (images, labels))
+    sample = next(iter(train_dataloader))
+    if isinstance(sample, (tuple, list)):
+        images, labels = sample
+        print(f"\nInput sample shape: {tuple(images.shape)}")
+        print(f"Labels shape: {tuple(labels.shape)}\n")
+    else:
+        images = sample
+        print(f"\nInput sample shape: {tuple(images.shape)}\n")
     
 
     # *Configurate the noise scheduler
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=max_timesteps,
+        beta_schedule="scaled_linear",
         beta_start=0.0001,
         beta_end=0.02,
+        clip_sample=True
     )
 
     noise_scheduler.set_timesteps(max_timesteps)
@@ -168,98 +188,56 @@ if __name__ == "__main__":
     # *Training loop
     torch.autograd.set_detect_anomaly(False)   # enable True only when debugging
     global_step = 0
-    for epoch in range(num_epochs):
-        model.train()
-        epoch_losses = []
-        for batch in train_dataloader:
-            # support dataloader returning (x, y) or just x
-            x = batch[0] if isinstance(batch, (list, tuple)) else batch
-            x = x.to(device)
+    val_losses = []
+    running_avg_losses = []
 
-            timestep = torch.randint(0, T, (x.shape[0],), device=device, dtype=torch.long)
-            noise = torch.randn_like(x, device=device)
-            noisy_images = noise_scheduler.add_noise(x, noise, timestep)
-
-            optimizer.zero_grad()
-            if device.type == "cuda":
-                # mixed precision only on CUDA
-                with autocast("cuda"):
-                    noise_pred = model(noisy_images, timestep)
-                    loss = loss_fn(noise_pred, noise)
-                # scale, backward, then unscale to clip grads safely
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # CPU path: no autocast/scaler
-                noise_pred = model(noisy_images, timestep)
-                loss = loss_fn(noise_pred, noise)
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
-
-            # detect NaN/Inf loss
-            if torch.isnan(loss) or torch.isinf(loss):
-                print("NaN/Inf loss at step", global_step, "epoch", epoch)
-                torch.save(model.state_dict(), f"bad_state_step_{global_step}.pt")
-                raise RuntimeError("Stopping: loss became NaN/Inf")
-
-            # detect NaN outputs from model (run on a small forward, no grad)
-            with torch.no_grad():
-                out = model(noisy_images, timestep)
-                if torch.isnan(out).any():
-                    print("NaN in model output; stopping.")
-                    torch.save(model.state_dict(), f"bad_model_out_{global_step}.pt")
-                    raise RuntimeError("NaN in model output")
-
-            epoch_losses.append(loss.item())
-
-            # EMA update should happen AFTER a successful optimizer.step()
-            ema.update(model)
-            global_step += 1
-            optimizer.zero_grad()
-
+    for epoch in range(start_epoch, num_epochs):
+        epoch_loss = train_epoch(
+        model, train_dataloader, optimizer, scheduler_lr,
+        noise_scheduler, loss_fn, device, scaler, epoch, num_epochs
+    )
+        # Step learning rate scheduler
         scheduler_lr.step()
-        avg_train_loss = sum(epoch_losses) / max(1, len(epoch_losses))
         
-        # Validation loop
-        model.eval()
+        # Log average loss
+        avg_epoch_loss = epoch_loss / len(train_dataloader)
+        print(f"\nEpoch {epoch+1} average loss: {avg_epoch_loss:.4f}")
+        
+    # *Validation
+        val_loss, running_avg_loss = validate(model, val_dataloader, noise_scheduler, loss_fn, device)
+        
+        # After dataset creation, add lists to store metrics
         val_losses = []
-        with torch.no_grad():
-            for batch in val_dataloader:
-                x = batch[0] if isinstance(batch, (list, tuple)) else batch
-                x = x.to(device)
-                timestep = torch.randint(0, T, (x.shape[0],), device=device, dtype=torch.long)
-                noise = torch.randn_like(x, device=device)    # gaussian noise
-                noisy_images = noise_scheduler.add_noise(x, noise, timestep)
+        running_avg_losses = []
 
-                if device.type == "cuda":
-                    with autocast("cuda"):
-                        noise_pred = model(noisy_images, timestep)
-                        vloss = loss_fn(noise_pred, noise)
-                else:
-                    noise_pred = model(noisy_images, timestep)
-                    vloss = loss_fn(noise_pred, noise)
-                val_losses.append(vloss.item())
-        avg_val_loss = sum(val_losses) / max(1, len(val_losses))
+        val_losses.append(val_loss)
+        running_avg_losses.append(running_avg_loss)
         
-        print(f"Epoch {epoch+1}/{num_epochs} | Train Loss: {avg_train_loss:.4f} | Validation Loss: {avg_val_loss:.4f}")
-
-        # save best and periodic checkpoints
-        if avg_val_loss < best_loss:
-            best_loss = avg_val_loss
-            best_model_path = os.path.join(save_dir, f"best_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}_model.pth")
+        # Print metrics
+        print(f"\nEpoch {epoch+1}/{num_epochs}")
+        print(f"Training loss: {epoch_loss/len(train_dataloader):.4f}")
+        print(f"Validation loss: {val_loss:.4f}")
+        print(f"Running avg val loss: {running_avg_loss:.4f}")
+        print(f"Best validation loss: {min(val_losses):.4f}")
+        print("-" * 50)
+        
+        # Save if running average improved
+        if running_avg_loss == min(running_avg_losses):
+            print(f"Running average validation loss improved. Saving checkpoint...")
             torch.save({
-                "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
-                "ema_state": ema.state_dict(),
-                "loss": best_loss
-            }, best_model_path)
+                'epoch': epoch + 1,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler_lr.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
+                'val_loss': val_loss,
+                'running_avg_loss': running_avg_loss,
+                'val_losses': val_losses,
+                'running_avg_losses': running_avg_losses,
+                'ema_state': ema.state_dict(),
+            }, f"models/best_model.pth")
 
+        
         if (epoch + 1) % save_every_epochs == 0:
             ckpt_path = os.path.join(save_dir, f"model_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}_{current_epoch+epoch+1}.pth")
             torch.save({
@@ -268,35 +246,44 @@ if __name__ == "__main__":
                 "optimizer_state_dict": optimizer.state_dict(),
                 "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
                 "ema_state": ema.state_dict(),
-                "loss": avg_val_loss
+                "loss": running_avg_loss,
             }, ckpt_path)
         # sample and save images for quick inspection
         if epoch % sample_every_epochs == 0:
             model.eval()
             with torch.no_grad():
                 ema.apply_shadow(model)
-                samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=True, debug=False)
+                generated_images = sample_images(
+                    model, 
+                    noise_scheduler, 
+                    img_size=28 if Test else 64, 
+                    device=device, 
+                    n=16, 
+                    Test=True, 
+                    labels= torch.arange(4).repeat(4),
+                    num_classes=num_classes)
                 ema.restore(model)
                 # sample_images may return (samples, intermediates) or a tensor/ndarray
-                if isinstance(samples, (list, tuple)):
-                    samples = samples[0]
+                if isinstance(generated_images, (list, tuple)):
+                    generated_images = generated_images[0]
             # save grid
             os.makedirs("figures/samples", exist_ok=True)
-            torchvision.utils.save_image(samples, f"figures/samples/samples_epoch_{epoch}.png", nrow=4, normalize=True)
+            torchvision.utils.save_image(generated_images, f"figures/samples/samples_epoch_{epoch}.png", nrow=4, normalize=True)
 
     print(f"\nBest model saved with loss {best_loss:.4f}")
     print("\nTraining complete.")
 
-    # Save the model after training
-    torch.save(model.state_dict(), f"./models/{model_name}_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
-
     # Save EMA state plus a copy of the model with EMA weights applied
+    os.makedirs(f"./models/Batch_size_{batch_size}", exist_ok=True)
     torch.save({
         "model_state_dict": model.state_dict(),
         "ema_state": ema.state_dict(),
-    }, f"./models/{model_name}_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
+    }, f"./models/Batch_size_{batch_size}/{model_name}{'_test' if Test else ''}_{num_epochs}.pth")
+
 
     # Also save a separate file with EMA weights applied to the model (for easy inference)
+    os.makedirs("./models/EMA", exist_ok=True)
     ema.apply_shadow(model)
-    torch.save(model.state_dict(), f"./models/{model_name}_EMA_BS_{batch_size}_MaxT_{max_timesteps}{'_test' if Test else ''}.pth")
+    torch.save(model.state_dict(), f"./models/EMA/{model_name}_EMA_BS_{batch_size}{'_test' if Test else ''}.pth")
     ema.restore(model)
+    print(f"EMA model saved as ./models/EMA/{model_name}_EMA_BS_{batch_size}{'_test' if Test else ''}.pth")

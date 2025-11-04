@@ -23,8 +23,10 @@ def parse_args():
     parser.add_argument("--max_timesteps", type=int, default=1000, help="Number of timesteps")
     parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
     parser.add_argument("--checkpoint", action="store_true", help="Use a checkpoint model to eval")
-    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic")
+    parser.add_argument("--EMA", action="store_true", help="Use EMA weights for evaluation")
+    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
     parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
+    parser.add_argument("--num_classes", type=int, default=10, help="Number of classes for label embedding")
     return parser.parse_args()
 # ----------------------------------------------
 args = parse_args()
@@ -33,6 +35,9 @@ max_timesteps = args.max_timesteps
 Test = args.test
 Checkpoint = args.checkpoint
 model_name = args.model_name
+num_classes = args.num_classes
+EMA = args.EMA
+
 if Checkpoint:
         if not args.model_name:
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
@@ -41,6 +46,16 @@ if Checkpoint:
         ckpt_path = f"models/checkpoints/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: Checkpoint file {ckpt_path} does not exist. Exiting.")
+            sys.exit(1)
+        model_name = args.model_name
+if EMA:
+        if not args.model_name:
+            print("Warning: --EMA set but no --model_name provided. Exiting.")
+            sys.exit(1)
+
+        ckpt_path = f"models/EMA/{args.model_name}.pth"
+        if not os.path.exists(ckpt_path):
+            print(f"Warning: EMA file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
         model_name = args.model_name
 
@@ -72,8 +87,8 @@ else:
 in_ch = 1 if Test else 3
 out_ch = 1 if Test else 3
 
-model = BasicUNet(in_channels=in_ch, out_channels=out_ch).to(device) if args.model == "Basic" \
-        else UNET(in_channels=in_ch, out_channels=out_ch).to(device)
+model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=num_classes).to(device) if args.model == "Basic" \
+    else UNET(in_channels=in_ch, out_channels=out_ch, num_classes=num_classes).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() # L2 loss for noise prediction
@@ -85,17 +100,43 @@ if Test:
         # Load from checkpoint
         ckpt_file = os.path.join("models", "checkpoints", f"{model_name}.pth")
         ckpt = torch.load(ckpt_file, map_location=device)
+        # Load only the model state dict from the checkpoint
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
         ema.load_state_dict(ckpt.get("ema_state", {}))
+    elif EMA:
+        # Load from EMA checkpoint
+        ckpt_file = os.path.join("models", "EMA", f"{model_name}_EMA_BS_{batch_size}.pth")
+        ckpt = torch.load(ckpt_file, map_location=device)
+        model.load_state_dict(ckpt)
     else:
         # Load the trained model weights
-        model.load_state_dict(torch.load(f"models/{model_name}.pth", weights_only=True))
+        weights_file = os.path.join("models", f"{model_name}.pth")
+        try:
+            # Try loading as a full checkpoint first
+            ckpt = torch.load(weights_file, map_location=device)
+            if "model_state_dict" in ckpt:
+                model.load_state_dict(ckpt["model_state_dict"])
+            else:
+                # If not a checkpoint, try loading as direct state dict
+                model.load_state_dict(ckpt)
+        except Exception as e:
+            print(f"Error loading model weights: {str(e)}")
+            sys.exit(1)
 else:
-    # Load the trained model weights
-    model.load_state_dict(torch.load(f"models/{model_name}.pth", weights_only=True))
-
-
+    # Load the trained model weights for non-test case
+    file_p = os.path.join("models", f"{model_name}.pth")
+    try:
+        ckpt = torch.load(file_p, map_location=device)
+        if "model_state_dict" in ckpt:
+            model.load_state_dict(ckpt["model_state_dict"])
+            optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
+            ema.load_state_dict(ckpt.get("ema_state", {}))
+        else:
+            model.load_state_dict(ckpt)
+    except Exception as e:
+        print(f"Error loading model weights: {str(e)}")
+        sys.exit(1)
 
 # Configurate the noise scheduler
 noise_scheduler = DDPMScheduler(
@@ -130,7 +171,11 @@ alpha_cumprod = torch.cumprod(alphas, dim=0)
 # Get the model predictions
 model.eval()
 with torch.no_grad():
-    pred = model(noised_x, timestep)
+    # if test loader yields labels, pass them in; otherwise leave None
+    labels_for_batch = None
+    if isinstance(batch, (list, tuple)) and len(batch) > 1:
+        labels_for_batch = batch[1]
+    pred = model(noised_x, timestep, labels_for_batch.to(device) if labels_for_batch is not None else None)
 
 # reconstruct x0 estimate from predicted noise
 alpha_cumprod_t = alpha_cumprod[timestep].view(-1, 1, 1, 1)
@@ -144,13 +189,13 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
 ema.apply_shadow(model)            # swap in EMA weights
-samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test, debug=True, save_intermediates=False)
+samples = sample_images(model, noise_scheduler, img_size=28, device=device, n=16, Test=Test, debug=True)
 ema.restore(model)                 # restore original weights after sampling
 # unpack if sample_images returned (samples, intermediates)
 if isinstance(samples, (list, tuple)) and len(samples) >= 1:
     samples = samples[0]
 else:
-    samples = samples
+    pass
 if isinstance(samples, np.ndarray):
     samples = torch.from_numpy(samples).float()
 if isinstance(samples, torch.Tensor):

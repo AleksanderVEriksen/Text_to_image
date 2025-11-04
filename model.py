@@ -49,9 +49,25 @@ class TimeEmbedding(nn.Module):
         x = self.linear2(x)
         return x  # (batch_size, emb_dim)
 
+class LabelEmbedding(nn.Module):
+    def __init__(self, num_classes, emb_dim):
+        super().__init__()
+        self.embedding = nn.Embedding(num_classes, emb_dim)
+        self.linear1 = nn.Linear(emb_dim, emb_dim)
+        self.act = nn.ReLU()
+        self.linear2 = nn.Linear(emb_dim, emb_dim)
+
+    def forward(self, labels):
+        # *labels: (batch_size,)
+        x = self.embedding(labels)
+        x = self.linear1(x)
+        x = self.act(x)
+        x = self.linear2(x)
+        return x  # (batch_size, emb_dim)
+
 class UNET(nn.Module):
     # *UNET for 2 channel images (RGB)
-    def __init__(self, in_channels=3, out_channels=3):
+    def __init__(self, in_channels=3, out_channels=3, num_classes: int = 10):
         assert in_channels == out_channels, "Input and output channels must be the same"
         super(UNET, self).__init__()
         # Downsampling
@@ -59,17 +75,22 @@ class UNET(nn.Module):
         self.down_conv1 = double_conv(in_channels, 32)
         self.down_conv2 = double_conv(32, 64)
         self.down_conv3 = double_conv(64, 128)
-        #self.down_conv4 = double_conv(256, 512)
-        #self.down_conv5 = double_conv(512, 1024)
+        self.down_conv4 = double_conv(128, 256)
+        self.down_conv5 = double_conv(256, 512)
+        #self.down_conv6 = double_conv(512, 1024)
 
         # *Time embedding
-        self.time_mlp = TimeEmbedding(128)
+        self.time_mlp = TimeEmbedding(512)
+        # *Label embedding (optional conditioning)
+        self.label_mlp = LabelEmbedding(num_classes, 512)
         
         # Upsampling
         #self.up_trans1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
         #self.up_conv1 = double_conv(1024, 512)
-        #self.up_trans2 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
-        #self.up_conv2 = double_conv(512, 256)
+        self.up_trans1 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.up_conv1 = double_conv(512, 256)
+        self.up_trans2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.up_conv2 = double_conv(256, 128)
         self.up_trans3 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
         self.up_conv3 = double_conv(128, 64)
         self.up_trans4 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
@@ -77,43 +98,53 @@ class UNET(nn.Module):
         self.out = nn.Conv2d(32, out_channels, kernel_size=1)
     
     @autocast(device_type='cuda')
-    def forward(self, x, t):
+    def forward(self, x, t, labels=None):
         # encode
-        x1 = self.down_conv1(x)
+        x1 = self.down_conv1(x) # 32
         x2 = self.max_pool_2x2(x1)
-        x3 = self.down_conv2(x2)
+        x3 = self.down_conv2(x2) # 64
         x4 = self.max_pool_2x2(x3)
-        x5 = self.down_conv3(x4)
-        #x6 = self.max_pool_2x2(x5)
-        #x7 = self.down_conv4(x6)
-        #x8 = self.max_pool_2x2(x7)
-        #x9 = self.down_conv5(x8)
+        x5 = self.down_conv3(x4) # 128
+        x6 = self.max_pool_2x2(x5)
+        x7 = self.down_conv4(x6) # 256
+        x8 = self.max_pool_2x2(x7)
+        x9 = self.down_conv5(x8) # 512
 
         # *Add time embedding
         t_emb = self.time_mlp(t)
         t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
-        x5 = x5 + t_emb
+        x9 = x9 + t_emb
+        # *Add label embedding if provided
+        if labels is not None:
+            # labels: (batch,)
+            l_emb = self.label_mlp(labels.to(t.device))
+            l_emb = l_emb[:, :, None, None]
+            x9 = x9 + l_emb
 
         # decode
-        #x = self.up_trans1(x9)
-        #y = crop_tensor(x7, x)
-        #x = self.up_conv1(torch.cat([x, y], dim=1))
-        #x = self.up_trans2(x)
-        #y = crop_tensor(x5, x)
-        #x = self.up_conv2(torch.cat([x, y], dim=1))
+        x = self.up_trans1(x9)
+        y = crop_tensor(x7, x)
+        x = self.up_conv1(torch.cat([x, y], dim=1))
+
+        x = self.up_trans2(x7)
+        y = crop_tensor(x5, x)
+        x = self.up_conv2(torch.cat([x, y], dim=1))
+
         x = self.up_trans3(x5)
         y = crop_tensor(x3, x)
         x = self.up_conv3(torch.cat([x, y], dim=1))
+
         x = self.up_trans4(x)
         y = crop_tensor(x1, x)
         x = self.up_conv4(torch.cat([x, y], dim=1))
+
         x = self.out(x)
         return x
 
 
 class BasicUNet(nn.Module):
     """A minimal UNet implementation."""
-    def __init__(self, in_channels=1, out_channels=1, TEST=False):
+    def __init__(self, in_channels=1, out_channels=1, TEST=False, num_classes: int = 10):
         super().__init__()
 
         self.TEST = TEST # * For MNIST dataset
@@ -125,6 +156,8 @@ class BasicUNet(nn.Module):
         ])
 
         self.time_mlp = TimeEmbedding(64)
+        # optional label embedding (small dim for BasicUNet)
+        self.label_mlp = LabelEmbedding(num_classes, 64)
 
         self.up_layers = torch.nn.ModuleList([
             nn.Conv2d(64, 64, kernel_size=5, padding=2),
@@ -134,7 +167,7 @@ class BasicUNet(nn.Module):
         self.act = nn.SiLU() # The activation function
         self.downscale = nn.MaxPool2d(2)
         self.upscale = nn.Upsample(scale_factor=2)
-    def forward(self, x, t):
+    def forward(self, x, t, labels=None):
         h = []
         # First the down layers
         for i, l in enumerate(self.down_layers):
@@ -146,9 +179,15 @@ class BasicUNet(nn.Module):
         # * Only for testing on MNIST
         if self.TEST:
             print("Before t_emb:", x.shape)
-            t_emb = self.time_mlp(t)
-            t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
-            x = x + t_emb
+        t_emb = self.time_mlp(t)
+        t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
+        x = x + t_emb
+        # Add label embedding if provided
+        if labels is not None:
+            l_emb = self.label_mlp(labels.to(t.device))
+            l_emb = l_emb[:, :, None, None]
+            x = x + l_emb
+        if self.TEST:
             print("After t_emb", x.shape)
             self.TEST = False 
 

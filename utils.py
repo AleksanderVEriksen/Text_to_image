@@ -2,6 +2,9 @@ import matplotlib.pyplot as plt
 from diffusers import DDPMScheduler
 import torch
 import torchvision
+from torchvision import transforms
+import PIL.Image
+from tqdm.auto import tqdm
 
 # ! Not used - possible removal in future
 def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1):
@@ -57,12 +60,10 @@ def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1)
         plt.show()
 
 
-from torchvision import transforms
-
 # Definer transformasjoner én gang
 transform = transforms.Compose([
-    transforms.Resize((128, 128)),   # resize til 128x128
-    transforms.ToTensor(),           # konverter til tensor og normaliser til [0,1]
+    transforms.ToTensor(),           # convert to tensor and normalize to [0,1]
+    transforms.Lambda(lambda x: 2 * x - 1)  # normalize to [-1, 1]
 ])
 
 # Load image to tensor
@@ -80,63 +81,131 @@ def sample_to_tensor(sample):
         return transform(sample[0])
     
 def collate_fn(batch):
-    images = [sample_to_tensor(img) for img in batch]
-    return torch.stack(images, dim=0)
+    images = []
+    labels = []
+    for sample in batch:
+        if isinstance(sample, dict):
+            images.append(sample.get('image', sample.get('jpg', None)))
+            labels.append(sample.get('label', -1))
+        else:
+            # Handle tuple case (image, label)
+            if isinstance(sample, tuple) and len(sample) >= 1:
+                img = sample[0]
+                label = sample[1] if len(sample) > 1 else -1
+                if isinstance(img, PIL.Image.Image):
+                    img = transform(img)
+                images.append(img)
+                labels.append(label)
+            else:
+                images.append(sample)
+                labels.append(-1)
+
+    # Stack images and ensure they're tensors
+    images = [img if isinstance(img, torch.Tensor) else transform(img) for img in images]
+    images = torch.stack(images, dim=0)
+    
+    # Convert labels to tensor
+    labels = torch.tensor([int(l) if not isinstance(l, torch.Tensor) else int(l.item()) 
+                        for l in labels], dtype=torch.long)
+    return images, labels
 
 
 # Sample generated images
 # use scheduler.set_timesteps(...) before calling this
-def sample_images(model, scheduler: DDPMScheduler, img_size: int, device, n: int = 16, Test: bool = False, debug: bool = False, save_intermediates: bool = False):
-    """
-    Use diffusers scheduler for sampling. Call scheduler.set_timesteps(num_inference_steps)
-    before calling this function. Returns CPU tensor (n,C,H,W).
+def text_to_label(label, num_classes: int = 10):
+    """Convert text/numeric label to tensor index."""
+    if isinstance(label, int):
+        return label
+    if isinstance(label, str):
+        try:
+            # Try direct numeric conversion first
+            return int(label)
+        except ValueError:
+            # Map text to numbers
+            label_map = {
+                'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+                'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9
+            }
+            label = label.lower()
+            if label in label_map:
+                return label_map[label]
+    raise ValueError(f"Unsupported label format: {label}")
 
-    debug: print per-step stats (already present).
-    save_intermediates: save x0_pred grids at a few checkpoints (helps inspect progressive denoising).
-    """
+def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=False, labels=None, num_classes=10):
+    """Generate images using the diffusion model."""
     model.eval()
+    
+    # Set up initial noise
     channels = 1 if Test else 3
     x = torch.randn((n, channels, img_size, img_size), device=device)
-
-    # prepare beta / alpha arrays from scheduler (device-aware)
-    betas = scheduler.betas.to(device) if hasattr(scheduler, "betas") else torch.linspace(scheduler.beta_start, scheduler.beta_end, scheduler.config.num_train_timesteps, device=device)
-    alphas = 1.0 - betas
-    alpha_cumprod = torch.cumprod(alphas, dim=0)
-    sqrt_alpha_cumprod = torch.sqrt(alpha_cumprod)
-    sqrt_one_minus_alpha_cumprod = torch.sqrt(1.0 - alpha_cumprod)
-
-    timesteps = list(scheduler.timesteps)
-    saved = {}
-    for i, t in enumerate(timesteps):
-        t_int = int(t)
-        t_batch = torch.full((n,), t_int, device=device, dtype=torch.long)
+    
+    # Convert labels to tensor
+    if labels is not None:
+        if isinstance(labels, (str, int)):
+            # Single label -> convert and repeat
+            label_idx = text_to_label(labels, num_classes)
+            labels = torch.full((n,), label_idx, dtype=torch.long, device=device)
+        elif isinstance(labels, (list, tuple)):
+            # List of labels -> convert each and create tensor
+            label_indices = [text_to_label(l, num_classes) for l in labels]
+            labels = torch.tensor(label_indices, dtype=torch.long, device=device)
+            if len(labels) < n:
+                labels = labels.repeat(n // len(labels) + 1)[:n]
+        elif isinstance(labels, torch.Tensor):
+            labels = labels.to(device)
+        else:
+            raise TypeError(f"Unsupported label type: {type(labels)}")
+    
+    # Sampling loop
+    for t in scheduler.timesteps:
         with torch.no_grad():
-            eps_pred = model(x, t_batch)
+            # Get model prediction
+            noise_pred = model(x, t.expand(n).to(device), labels)
+            
+            # Update sample with scheduler
+            step_output = scheduler.step(noise_pred, t, x)
+            x = step_output.prev_sample
+            
+            if debug:
+                print(f"Step {t}: x range [{x.min():.3f}, {x.max():.3f}]")
+    
+    # Ensure output is in [-1, 1]
+    x = torch.clamp(x, -1, 1)
+    return x.cpu()
 
-        # compute x0 estimate for debugging/visualization (per-sample)
-        denom = sqrt_alpha_cumprod[t_int].view(1, 1, 1, 1)
-        x0_pred = (x - sqrt_one_minus_alpha_cumprod[t_int].view(1,1,1,1) * eps_pred) / (denom + 1e-8)
 
-        out = scheduler.step(model_output=eps_pred, timestep=t_int, sample=x)
-        x = out.prev_sample if hasattr(out, "prev_sample") else out["prev_sample"]
-
-        if debug:
-            print(f"step {i}/{len(timesteps)-1} t={t_int} | x stats min/max/mean/std: {float(x.min()):.6f}/{float(x.max()):.6f}/{float(x.mean()):.6f}/{float(x.std()):.6f}")
-
-        # optionally save intermediate x0_pred visualizations at a few checkpoints
-        if save_intermediates and (i in (0, len(timesteps)//4, len(timesteps)//2, 3*len(timesteps)//4, len(timesteps)-1)):
-            # normalize each sample independently for visibility (keeps relative structure)
-            xp = x0_pred.detach().cpu().clone()
-            N = xp.shape[0]
-            for j in range(N):
-                s = xp[j]
-                mn, mx = float(s.min()), float(s.max())
-                if mx - mn > 1e-8:
-                    xp[j] = (s - mn) / (mx - mn)
-                else:
-                    xp[j] = s - mn
-            grid = torchvision.utils.make_grid(xp, nrow=int(max(1, min(8, N//2))), normalize=False, pad_value=1)
-            saved[f"step_{t_int}"] = grid.permute(1,2,0).numpy()
-
-    # final sample on CPU
-    return x.cpu(), saved
+def validate(model, val_dataloader, noise_scheduler, loss_fn, device, max_batches=None):
+    """Run validation loop and return both batch and running average losses."""
+    model.eval()
+    val_loss = 0
+    running_avg_loss = 0
+    alpha = 0.1  # Smoothing factor for running average
+    batches = 0
+    
+    with torch.no_grad():
+        for batch in tqdm(val_dataloader, desc="Validating", leave=False):
+            if max_batches and batches >= max_batches:
+                break
+                
+            images, labels = batch
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            timesteps = torch.randint(0, len(noise_scheduler.timesteps), 
+                                    (images.shape[0],), device=device).long()
+            
+            noise = torch.randn_like(images)
+            noisy_images = noise_scheduler.add_noise(images, noise, timesteps)
+            
+            noise_pred = model(noisy_images, timesteps, labels=labels)
+            loss = loss_fn(noise_pred, noise)
+            
+            val_loss += loss.item()
+            # Update running average
+            if batches == 0:
+                running_avg_loss = loss.item()
+            else:
+                running_avg_loss = (1 - alpha) * running_avg_loss + alpha * loss.item()
+            batches += 1
+            
+    return val_loss / batches, running_avg_loss

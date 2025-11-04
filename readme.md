@@ -33,28 +33,39 @@ Commands to use to run this program. Args for train and eval are not necessary, 
 
 ### Run train
 
-``Commands: python train.py``
+`Commands: python train.py`
 
-- ``Args:``
-  - ``--batch_size(default 32)``
-  - ``--epochs(default 5)``
-  - ``--max_timesteps(default 1000)``
-  - ``--test(include if MNIST dataset)``
-  - ``--checkpoint(if the model used is from a checkpoint)``
-  - ``--model(If using Basic UNET)``
-  - ``--model_name(default model)``
+- `Args:`
+  - `--batch_size` (default: 32) - Training batch size
+  - `--epochs` (default: 200) - Number of training epochs
+  - `--max_timesteps` (default: 1000) - Number of diffusion timesteps
+  - `--num_classes` (default: 10) - Number of label classes for conditioning
+  - `--img_size` (default: 28) - Image size (assumes square)
+  - `--model` (default: "UNET", choices: ['UNET', 'Basic']) - Model architecture to use
+  - `--model_name` (default: "model") - Name for saving/loading model
+  - `--test` (flag) - Use MNIST dataset for testing
+  - `--checkpoint` (flag) - Resume from checkpoint
+  - `--save_every` (default: 5) - Save checkpoint every N epochs
+  - `--sample_every` (default: 2) - Generate samples every N epochs
+  - `--lr` (default: 5e-5) - Initial learning rate
+  - `--weight_decay` (default: 0.01) - Weight decay for optimizer
 
 ### Run eval
 
-``Commands: python eval.py``
+`Commands: python eval.py`
 
-- ``Args:``
-  - ``--batch_size(default 32)``
-  - ``--max_timesteps(default 1000)``
-  - ``--test(include if MNIST dataset)``
-  - ``--checkpoint(if the model used is from a checkpoint)``
-  - ``--model(if using Basic UNET)``
-  - ``--model_name(default model)``
+- `Args:`
+  - `--batch_size` (default: 32) - Batch size for evaluation
+  - `--max_timesteps` (default: 1000) - Number of diffusion timesteps
+  - `--num_classes` (default: 10) - Number of label classes for conditioning
+  - `--img_size` (default: 28) - Image size (assumes square)
+  - `--model` (default: "UNET", choices: ['UNET', 'Basic']) - Model architecture to use
+  - `--model_name` (default: "model") - Name of model to load
+  - `--test` (flag) - Use MNIST dataset for testing
+  - `--checkpoint` (flag) - Load from checkpoint
+  - `--EMA` (flag) - Use EMA weights for evaluation
+  - `--num_samples` (default: 16) - Number of samples to generate
+  - `--save_path` (default: "figures") - Path to save evaluation results
 
 ## Goal
 
@@ -76,6 +87,14 @@ Create a UNET that takes in "timesteps" in order to predict the denoise level of
 #### Step 3
 
 Adjust noise level for proper predictions
+
+#### Step 4
+
+Add conditional prediction to UNET by adding labels.
+
+#### Step 5
+
+Add sampler to reconstruct images from noise to test the model
 
 ## Tests
 
@@ -99,4 +118,16 @@ Adjust noise level for proper predictions
 |*Evaluation of trained UNET on MNIST dataset - 1000 timesteps*|
 |:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-5.png "Eval on model trained on MNIST")|
+|:--:|
+
+### Test with attached labels
+
+|*Evaluation of trained UNET on MNIST dataset - 1000 timesteps*|
+|:--:|
+|![Evaluation of trained UNET on MNIST dataset](image-6.png "Eval on model trained on MNIST")|
+|:--:|
+
+|*Generated images of 7 from text*|
+|:--:|
+|![Generated images of 7 from text prompt](image-7.png "Reconstructed images of 7")|
 |:--:|
