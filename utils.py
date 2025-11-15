@@ -7,59 +7,8 @@ import PIL.Image
 from tqdm.auto import tqdm
 import numpy as np
 import os
-
-# ! Not used - possible removal in future
-def plot_images(normal_images, noisy_images, max_images=1, max_noise=5, steps=1):
-    """
-    normal_images: tensor [B,C,H,W] eller [C,H,W]
-    noisy_images: tensor [B,T,C,H,W] eller [T,C,H,W]
-    max_images: maks antall bilder fra batch å vise
-    max_noise: maks antall støy-step å vise per bilde
-    steps: steg mellom støy-visning
-    """
-
-    # Single image -> batch
-    if normal_images.ndim == 3:
-        normal_images = normal_images.unsqueeze(0)  # [1,C,H,W]
-    if noisy_images.ndim == 4:  # [T,C,H,W]
-        noisy_images = noisy_images.unsqueeze(0)  # [1,T,C,H,W]
-
-    B = min(max_images, normal_images.shape[0])
-
-    for b in range(B):
-        orig = normal_images[b]          # [C,H,W]
-        noisy = noisy_images[b]          # [T,C,H,W]
-
-        T = min(noisy.shape[0], max_noise)
-        indices = list(range(0, T, steps))
-        num_rows = 1 + len(indices)      # 1 rad for original + 1 rad per step
-
-        fig, axes = plt.subplots(num_rows, 1, figsize=(5, 5*num_rows))
-        if num_rows == 1:
-            axes = [axes]
-        else:
-            axes = axes.flatten()
-
-        # Originalbilde øverst
-        img = orig.cpu()
-        grid = torchvision.utils.make_grid(img, nrow=4, normalize=True)
-        axes[0].imshow(grid.permute(1,2,0).numpy())
-        axes[0].set_title("Original Image")
-        axes[0].axis('off')
-
-        # Noisy steg under originalen
-        for idx, i in enumerate(indices):
-            img = noisy[i]
-            if img.ndim == 2:
-                img = img.unsqueeze(0)
-            img = img.cpu()
-            grid = torchvision.utils.make_grid(img, nrow=4, normalize=True)
-            axes[idx+1].imshow(grid.permute(1,2,0).numpy())
-            axes[idx+1].set_title(f"Step {i+1}")
-            axes[idx+1].axis('off')
-
-        plt.tight_layout()
-        plt.show()
+import torch.nn.functional as F
+from torchvision.models import inception_v3
 
 
 # Definer transformasjoner én gang
@@ -154,7 +103,7 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
             # Ensure values stay mostly negative for black appearance
             x = x - x.mean(dim=(2,3), keepdim=True)
             
-            if debug and t % 20 == 0:
+            if debug and t % 100 == 0:
                 print(f"Step {t:3d}/{scheduler.timesteps[0]}: min={x.min():6.3f}, max={x.max():6.3f}")
     
     if debug:
@@ -166,16 +115,23 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
     return x.cpu()
 
 
-def validate(model, val_dataloader, noise_scheduler, loss_fn, device, max_batches=None):
-    """Run validation loop and return both batch and running average losses."""
+def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device, max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,img_size=28, Test=True):
+    """Run validation loop and return loss metrics, optionally including FID score."""
     model.eval()
     val_loss = 0
     running_avg_loss = 0
     alpha = 0.1  # Smoothing factor for running average
     batches = 0
+    fid_scores = [] if calculate_fid_score else None
     
     with torch.no_grad():
-        for batch in tqdm(val_dataloader, desc="Validating", leave=False):
+        for batch in tqdm(
+                val_dataloader, 
+                desc="Validating", 
+                leave=False, 
+                dynamic_ncols=True, 
+                position=0
+                ):
             if max_batches and batches >= max_batches:
                 break
                 
@@ -183,6 +139,7 @@ def validate(model, val_dataloader, noise_scheduler, loss_fn, device, max_batche
             images = images.to(device)
             labels = labels.to(device)
             
+            # Calculate validation loss
             timesteps = torch.randint(0, len(noise_scheduler.timesteps), 
                                     (images.shape[0],), device=device).long()
             
@@ -200,7 +157,29 @@ def validate(model, val_dataloader, noise_scheduler, loss_fn, device, max_batche
                 running_avg_loss = (1 - alpha) * running_avg_loss + alpha * loss.item()
             batches += 1
             
-    return val_loss / batches, running_avg_loss
+            # Optionally calculate FID for this batch every 50 epochs
+            if epochs % fid_epoch_calc == 0 and calculate_fid_score:
+                if batches <= max_batches:
+                    # Generate samples matching the batch
+                    generated_samples = sample_images(
+                        model, noise_scheduler, img_size, device, 
+                        n=images.shape[0], Test=Test, debug=False, 
+                        labels=labels, num_classes=10
+                    ).to(device)
+                    
+                    # Calculate FID for this batch
+                    fid = calculate_fid(images, generated_samples)
+                    fid_scores.append(fid)
+    
+    results = {
+        'val_loss': val_loss / batches,
+        'running_avg_loss': running_avg_loss
+    }
+    
+    if calculate_fid_score:
+        results['fid_score'] = np.mean(fid_scores) if fid_scores else float('inf')
+    
+    return results
 
 def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
     """Make a torchvision grid and return a float32 numpy array.
@@ -224,7 +203,7 @@ def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
         else:
             arr = np.clip(arr, 0.0, 1.0)
         return arr
-# torch.Tensor path
+    # torch.Tensor path
     grid = torchvision.utils.make_grid(tensor, nrow=nrow, normalize=False, pad_value=1)
     # move to CPU, ensure float32
     grid = grid.detach().cpu().to(torch.float32)
@@ -275,7 +254,7 @@ def normalize_per_sample(tensor, min_val=-1, max_val=1):
     # Reshape back
     return normalized.view(B, C, H, W)
 
-def load_model_weights(model, model_name, device, is_test=False, is_checkpoint=False, is_ema=False):
+def load_model_weights(model, batch_size, model_name, device, is_test=False, is_checkpoint=False, is_ema=False):
     """Load model weights with proper error handling and path resolution.
     
     Args:
@@ -291,11 +270,11 @@ def load_model_weights(model, model_name, device, is_test=False, is_checkpoint=F
     """
     # Determine weight path
     if is_checkpoint:
-        path = os.path.join("models", "checkpoints", f"{model_name}.pth")
+        path = os.path.join(f"models/{batch_size}", "checkpoints", f"{model_name}.pth")
     elif is_ema:
-        path = os.path.join("models", "EMA", f"{model_name}_EMA.pth")
+        path = os.path.join(f"models/{batch_size}", "EMA", f"{model_name}_EMA.pth")
     else:
-        path = os.path.join("models", f"{model_name}.pth")
+        path = os.path.join(f"models/{batch_size}", f"{model_name}.pth")
     
     try:
         checkpoint = torch.load(path, map_location=device)
@@ -314,3 +293,76 @@ def load_model_weights(model, model_name, device, is_test=False, is_checkpoint=F
     except Exception as e:
         print(f"Error loading weights from {path}: {str(e)}")
         return None
+
+def plot_losses(train_losses, val_losses, val_every, save_path="figures/loss_curves/loss_plot.png"):
+    """Plot training and validation losses over epochs.
+    
+    Args:
+        train_losses (list): List of training losses for each epoch
+        val_losses (list): List of validation losses (every val_every epochs)
+        val_every (int): Frequency of validation (e.g., every 5 epochs)
+        save_path (str): Path to save the plot image
+    """
+    epochs = list(range(1, len(train_losses) + 1))
+    val_epochs = [i * val_every for i in range(1, len(val_losses) + 1)]
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(epochs, train_losses, label='Training Loss', color='blue', linewidth=2)
+    plt.plot(val_epochs, val_losses, label='Validation Loss', color='red', linewidth=2, marker='o')
+    
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.title('Training and Validation Loss Over Epochs')
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    
+    # Ensure directory exists
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Loss plot saved to {save_path}")
+
+def calculate_fid(real_images, generated_images, device='cuda'):
+    """Calculate Fréchet Inception Distance between real and generated images.
+    
+    Args:
+        real_images (torch.Tensor): Real images, shape (N, C, H, W)
+        generated_images (torch.Tensor): Generated images, shape (N, C, H, W)
+        device (str): Device to run calculations on
+    
+    Returns:
+        float: FID score
+    """
+    # For MNIST, use a simpler metric since InceptionV3 isn't ideal for grayscale
+    # Calculate MSE as a proxy for now (replace with proper FID later)
+    mse = F.mse_loss(real_images, generated_images).item()
+    
+    # Placeholder for proper FID implementation:
+    # - Extract features using InceptionV3
+    # - Calculate mean and covariance of features
+    # - Compute Fréchet distance
+    
+    return mse  # Return MSE for now, implement full FID when needed
+
+def save_with_retry(save_func, *args, **kwargs):
+    """Helper function to save files with automatic directory creation on failure."""
+    try:
+        save_func(*args, **kwargs)
+    except (OSError, FileNotFoundError, RuntimeError) as e:  # Add RuntimeError
+        # Extract the file path from args or kwargs
+        file_path = None
+        if args and isinstance(args[1], str):  # Common pattern: save_func(tensor, path, ...)
+            file_path = args[1]
+        elif 'path' in kwargs:
+            file_path = kwargs['path']
+        elif 'save_path' in kwargs:
+            file_path = kwargs['save_path']
+        
+        if file_path:
+            dir_path = os.path.dirname(file_path)
+            print(f"Directory not found for {file_path}, creating it: {e}")
+            os.makedirs(dir_path, exist_ok=True)
+            save_func(*args, **kwargs)  # Retry after creating directory
+        else:
+            raise e  # Re-raise if we can't determine the path

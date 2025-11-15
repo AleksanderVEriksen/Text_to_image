@@ -2,9 +2,11 @@ from tqdm.auto import tqdm
 import torch
 from torch.cuda.amp import autocast
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")
 
 def train_epoch(model, dataloader, optimizer, noise_scheduler, loss_fn, 
-                device, scaler, epoch, num_epochs):
+                device, scaler, epoch, num_epochs, scheduler_lr=None):
     """Single epoch training function"""
     model.train()
     epoch_loss = 0
@@ -42,6 +44,10 @@ def train_epoch(model, dataloader, optimizer, noise_scheduler, loss_fn,
             "avg_loss": f"{epoch_loss/(step+1):.4f}",
             "lr": f"{optimizer.param_groups[0]['lr']:.6f}"
         }, refresh=True)
+        
+        # Step the scheduler every training step (for warmup and other per-step schedulers)
+        if scheduler_lr is not None:
+            scheduler_lr.step()
     
     progress_bar.close()
     return epoch_loss / len(dataloader)

@@ -1,1 +1,6 @@
 /venv
+/figures/samples
+/.vscode
+/__pycache__
+/mnist
+/data
