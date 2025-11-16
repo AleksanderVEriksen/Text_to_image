@@ -9,7 +9,7 @@ from utils import sample_images
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--model_name', type=str, default='model', help='Saved model filename (in ./models/)')
-    p.add_argument('--model_type', type=str, default='UNET', choices=['UNET', 'Basic'])
+    p.add_argument('--model', type=str, default='UNET', choices=['UNET', 'Basic'])
     p.add_argument('--label', type=str, required=True, help='Text label to condition on (e.g. "7" or "seven")')
     p.add_argument('--num_samples', type=int, default=16)
     p.add_argument('--num_classes', type=int, default=10)
@@ -96,8 +96,8 @@ def main():
 
     in_ch = 1 if args.img_size <= 28 else 3
     out_ch = in_ch
-    print(f"Using model type: {args.model_type} with in/out channels: {in_ch}/{out_ch}")
-    model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device) if args.model_type == 'Basic' else \
+    print(f"Using model type: {args.model} with in/out channels: {in_ch}/{out_ch}")
+    model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device) if args.model == 'Basic' else \
             UNET(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device)
 
     # Load model weights using the helper function
