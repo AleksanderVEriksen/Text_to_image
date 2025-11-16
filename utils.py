@@ -161,7 +161,7 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device, ma
                 running_avg_loss = (1 - alpha) * running_avg_loss + alpha * loss.item()
             batches += 1
             
-            # Optionally calculate FID for this batch every 50 epochs
+            # Optionally calculate FID for this batch every N epochs
             if epochs % fid_epoch_calc == 0 and calculate_fid_score:
                 if batches <= max_batches:
                     # Generate samples matching the batch

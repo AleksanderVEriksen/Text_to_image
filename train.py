@@ -326,7 +326,7 @@ if __name__ == "__main__":
             print(f"Validation loss: {val_loss:.4f}")
             print(f"Running avg val loss: {running_avg_loss:.4f}")
             print(f"Best validation loss: {min(val_losses):.4f}")
-            if fid_score is not None and epoch % FID_EPOCH_CALC == 0:
+            if fid_score is not None and current_epoch % FID_EPOCH_CALC == 0:
                 print(f"FID score: {fid_score:.4f}")
             print(f"Patience counter: {patience_counter}/{args.patience}")
         print("-" * 50)
