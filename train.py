@@ -49,14 +49,14 @@ def parse_args():
     parser.add_argument("--num_classes", type=int, default=10, help="Number of label classes for label embedding")
     parser.add_argument("--checkpoint", action="store_true", help="Use a checkpoint to resume training")
     parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
-    parser.add_argument("--val_every", type=int, default=10, help="Run validation every N epochs")
+    parser.add_argument("--val_every", type=int, default=3, help="Run validation every N epochs")
     parser.add_argument("--val_max_batches", type=int, default=8, help="Max validation batches (None for all)")
     parser.add_argument("--sample_every_epoch", type=int, default=50, help="Run sampling every N epochs")
     parser.add_argument("--save_every_epoch", type=int, default=10, help="Run saving every N epochs")
     parser.add_argument("--augment", action="store_true", default=False, help="Use data augmentation during training")
-    parser.add_argument("--patience", type=int, default=20, help="Early stopping patience epochs")
+    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience epochs")
     parser.add_argument("--top_k_models", type=int, default=3, help="Number of top models to save based on validation loss")
-    parser.add_argument("--fid_epoch_calc", type=int, default=10, help="Calculate FID every N epochs")
+    parser.add_argument("--fid_epoch_calc", type=int, default=9, help="Calculate FID every N epochs")
     return parser.parse_args()
 # ----------------------------------------------
 if __name__ == "__main__":
@@ -137,7 +137,7 @@ if __name__ == "__main__":
 
     # *Create the UNET model
     if args.model == "Basic":
-        model = BasicUNet(in_channels=1, out_channels=1, num_classes=num_classes).to(device)
+        model = BasicUNet(in_channels=num_channels, out_channels=num_channels, num_classes=num_classes).to(device)
     else:
         model = UNET(in_channels=num_channels, out_channels=num_channels, num_classes=num_classes).to(device)
 

@@ -16,16 +16,52 @@ def parse_args():
     p.add_argument('--img_size', type=int, default=28)
     p.add_argument('--timesteps', type=int, default=1000)
     p.add_argument('--out', type=str, default='generated.png')
+    p.add_argument('--batch_size', type=int, default=32, help='Batch size used during training (for loading correct model weights)')
     return p.parse_args()
 
+def parse_label_string(label_str, num_classes, num_samples, device):
+    """Convert a string like '7', 'seven', '1,3,5', 'two four', 'all' into a LongTensor."""
+    word_map = {
+        'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9
+    }
+    s = label_str.lower().strip()
+    if s == 'all':
+        vals = list(range(num_classes))
+    else:
+        # split by comma or whitespace
+        parts = [p for seg in s.split(',') for p in seg.strip().split() if p]
+        vals = []
+        for p in parts:
+            if p in word_map:
+                vals.append(word_map[p])
+            else:
+                try:
+                    v = int(p)
+                    vals.append(v)
+                except ValueError:
+                    raise ValueError(f"Cannot parse label token '{p}'")
+    if not vals:
+        raise ValueError("Parsed no labels from input string.")
+    # clamp to valid class range
+    vals = [v for v in vals if 0 <= v < num_classes]
+    if not vals:
+        raise ValueError("No valid class indices after filtering.")
+    # If single value, repeat to match num_samples
+    if len(vals) == 1 and num_samples > 1:
+        vals = vals * num_samples
+    # If fewer than num_samples, tile
+    if len(vals) < num_samples:
+        reps = (num_samples + len(vals) - 1) // len(vals)
+        vals = (vals * reps)[:num_samples]
+    return torch.tensor(vals, dtype=torch.long, device=device)
 
-def load_model(model, model_name, device, timesteps):
+
+def load_model(model, batch_size, model_name, device):
     """Helper function to load model weights with proper error handling"""
     possible_paths = [
-        f"models/{model_name}.pth",
-        f"models/checkpoints/{model_name}.pth",
-        f"models/{model_name}_EMA_BS_32_MaxT_{timesteps}.pth",
-        f"models/EMA/{model_name}_EMA_BS_32.pth"
+        f"models/{batch_size}/{model_name}.pth",
+        f"models/checkpoints/{batch_size}/{model_name}.pth",
     ]
     
     for path in possible_paths:
@@ -60,22 +96,26 @@ def main():
 
     in_ch = 1 if args.img_size <= 28 else 3
     out_ch = in_ch
+    print(f"Using model type: {args.model_type} with in/out channels: {in_ch}/{out_ch}")
     model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device) if args.model_type == 'Basic' else \
             UNET(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device)
 
     # Load model weights using the helper function
-    load_model(model, args.model_name, device, args.timesteps)
+    load_model(model, args.batch_size, args.model_name, device)
 
-    scheduler = DDPMScheduler(num_train_timesteps=args.timesteps, beta_start=0.0001, beta_end=0.02)
+    scheduler = DDPMScheduler(
+    num_train_timesteps=args.timesteps,
+    beta_schedule="scaled_linear",
+    beta_start=0.0001,
+    beta_end=0.02,
+    clip_sample=True
+)
     scheduler.set_timesteps(args.timesteps)
 
     model.eval()
     with torch.no_grad():
-        samples = sample_images(model, scheduler, img_size=args.img_size, device=device, n=args.num_samples, Test=(in_ch==1), labels=args.label, num_classes=args.num_classes)
-
-    # sample_images may return (samples, intermediates)
-    if isinstance(samples, (list, tuple)):
-        samples = samples[0]
+        labels = parse_label_string(args.label, args.num_classes, args.num_samples, device)
+        samples, timesteps_tensor = sample_images(model, scheduler, img_size=args.img_size, device=device, n=args.num_samples, Test=(in_ch==1), labels=labels, num_classes=args.num_classes)
 
     if isinstance(samples, torch.Tensor):
         samples = samples.cpu()

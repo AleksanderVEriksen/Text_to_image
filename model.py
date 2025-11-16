@@ -116,8 +116,18 @@ class UNET(nn.Module):
         x9 = x9 + t_emb
         # *Add label embedding if provided
         if labels is not None:
-            # labels: (batch,)
-            l_emb = self.label_mlp(labels.to(t.device))
+            # normalize labels input
+            if isinstance(labels, (list, tuple)):
+                labels = torch.tensor(labels, dtype=torch.long, device=t.device)
+            elif isinstance(labels, int):
+                labels = torch.tensor([labels], dtype=torch.long, device=t.device)
+            elif isinstance(labels, str):
+                raise TypeError("labels is a string; expected tensor/list/tuple of ints.")
+            elif isinstance(labels, torch.Tensor):
+                labels = labels.to(t.device).long()
+            else:
+                raise TypeError(f"Unsupported labels type: {type(labels)}")
+            l_emb = self.label_mlp(labels)
             l_emb = l_emb[:, :, None, None]
             x9 = x9 + l_emb
 

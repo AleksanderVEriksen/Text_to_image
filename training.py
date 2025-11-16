@@ -1,6 +1,6 @@
 from tqdm.auto import tqdm
 import torch
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")

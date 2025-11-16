@@ -7,7 +7,7 @@ import numpy as np
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
-from utils import collate_fn, sample_images, tensor_grid_to_numpy, normalize_per_sample, load_model_weights
+from utils import collate_fn, sample_images, tensor_grid_to_numpy, normalize_per_sample, load_model_weights, timesteps_to_str
 from ema import ExponentialMovingAverage
 import argparse
 import sys
@@ -103,13 +103,13 @@ if checkpoint is not None:
     ema.load_state_dict(checkpoint.get("ema_state", {}))
 
 # Configurate the noise scheduler
-    noise_scheduler = DDPMScheduler(
-        num_train_timesteps=max_timesteps,
-        beta_schedule="scaled_linear",
-        beta_start=0.0001,
-        beta_end=0.02,
-        clip_sample=True
-    )
+noise_scheduler = DDPMScheduler(
+    num_train_timesteps=max_timesteps,
+    beta_schedule="scaled_linear",
+    beta_start=0.0001,
+    beta_end=0.02,
+    clip_sample=True
+)
 # For diffusers sampling, set timesteps for inference (optionally different inference steps)
 noise_scheduler.set_timesteps(max_timesteps)   # important
 
@@ -155,7 +155,7 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
 ema.apply_shadow(model)            # swap in EMA weights
-samples = sample_images(
+samples, timesteps_used = sample_images(
     model, 
     noise_scheduler, 
     img_size=28, 
@@ -169,11 +169,21 @@ ema.restore(model)                 # restore original weights after sampling
 
 # ensure samples is on CPU
 samples = samples.cpu()
+timesteps_used = timesteps_used.cpu()
 
 # If your training normalized images to [-1, 1], map back:
 samples = ((samples + 1.0) / 2.0).clamp(0.0, 1.0)
 
 # --- Plotting ---
+
+# visualize predicted noise (map to 0..1 for display) and show compact stats in title
+pred_vis = pred.cpu()
+pred_min = float(pred_vis.min().item())
+pred_max = float(pred_vis.max().item())
+pred_vis = (pred_vis - pred_min) / (pred_max - pred_min + 1e-8)
+
+# format timesteps safely (truncate if too long)
+ts_str = timesteps_to_str(timestep.cpu())
 
 # Create figure with 4 stacked rows
 fig, axs = plt.subplots(4, 1, figsize=(10, 12))
@@ -182,26 +192,12 @@ axs[0].set_title('Input data(Before noising)', fontsize=10)
 axs[0].imshow(tensor_grid_to_numpy(x.cpu(), nrow=min(8, x.shape[0])), cmap='gray' if in_ch == 1 else None)
 axs[0].axis('off')
 
-axs[1].set_title(f'Corrupted data (timesteps: {timestep.cpu().numpy().tolist()})', fontsize=8)
+axs[1].set_title(f'Corrupted data\n(timesteps: {ts_str})', fontsize=8)
 axs[1].imshow(tensor_grid_to_numpy(noised_x.cpu(), nrow=min(8, noised_x.shape[0]), rescale=False), cmap='gray')
 axs[1].axis('off')
 
-# visualize predicted noise (map to 0..1 for display) and show compact stats in title
-pred_vis = pred.cpu()
-pred_min = float(pred_vis.min().item())
-pred_max = float(pred_vis.max().item())
-pred_vis = (pred_vis - pred_min) / (pred_max - pred_min + 1e-8)
-
-
-# format timesteps safely (truncate if too long)
-ts_list = timestep.cpu().tolist()
-if len(ts_list) > 20:
-    ts_str = str(ts_list[:pred_vis.shape[0]])[:-1] + "]"
-else:
-    ts_str = str(ts_list)
-
 pred_vis = normalize_per_sample(pred)
-axs[2].set_title(f'Noise Predictions (timesteps: {ts_str})', fontsize=8)
+axs[2].set_title(f'Noise Predictions\n(timesteps: {ts_str})', fontsize=8)
 axs[2].imshow(tensor_grid_to_numpy(pred_vis, nrow=min(8, pred_vis.shape[0]), rescale=False), cmap='gray')
 axs[2].axis('off')
 
@@ -232,10 +228,13 @@ else:
     samples_vis = (samples - smin) / (smax - smin + 1e-8)
     samples_vis = samples_vis.clamp(0.0, 1.0)
 
+
+# format timesteps safely (truncate if too long)
+ts_str = timesteps_to_str(timesteps_used)
 # Plot generated samples
 grid_arr = tensor_grid_to_numpy(samples_vis, nrow=min(8, samples_vis.shape[0]))
 plt.figure(figsize=(6, 6))
-plt.title("Generated Samples from Pure Noise", fontsize=14)
+plt.title(f"Generated Samples from Pure Noise\n(timesteps: {ts_str})", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
 plt.axis("off")
 plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")

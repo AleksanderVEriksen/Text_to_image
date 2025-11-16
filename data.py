@@ -1,4 +1,6 @@
 from datasets import load_dataset
+from torchvision import transforms
+from torchvision.datasets import MNIST
 
 def load_urls(urls):
     dataset = load_dataset("webdataset", data_files={"train": urls}, split="train", streaming=True)
@@ -29,6 +31,19 @@ def get_dataset(train:bool=True, test:bool=False, val: bool=False):
         "val": load_urls(val_urls),
         "test": load_urls(test_urls)
     }
+
+def get_mnist_dataset(train:bool=True, augment:bool=False):
+    
+    transform_list = [transforms.ToTensor()]
+    if augment:
+        transform_list = [
+            transforms.RandomRotation(10),
+            transforms.RandomAffine(0, translate=(0.1, 0.1)),
+        ] + transform_list
+    transform = transforms.Compose(transform_list)
+
+    dataset = MNIST(root='./data', train=train, download=True, transform=transform)
+    return dataset
 
 
 # Example of iterating through the dataset

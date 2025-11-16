@@ -63,7 +63,7 @@ def collate_fn(batch):
 
 # Sample generated images
 # use scheduler.set_timesteps(...) before calling this
-def text_to_label(label, num_classes: int = 10):
+def text_to_label(label, max_num_classes: int = 10):
     """Convert text/numeric label to tensor index."""
     if isinstance(label, int):
         return label
@@ -73,6 +73,8 @@ def text_to_label(label, num_classes: int = 10):
             return int(label)
         except ValueError:
             # Map text to numbers
+            if max_num_classes > 10:
+                raise ValueError("Text labels not supported for num_classes > 10")
             label_map = {
                 'zero': 0, 'one': 1, 'two': 2, 'three': 3, 'four': 4,
                 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9
@@ -87,12 +89,15 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
     model.eval()
     
     # Start with black noise (negative values) instead of random noise
-    x = -torch.abs(torch.randn((n, 1 if Test else 3, img_size, img_size), device=device))
+    #x = -torch.abs(torch.randn((n, 1 if Test else 3, img_size, img_size), device=device))
     
+    # Start with random noise (standard Gaussian)
+    x = torch.randn((n, 1 if Test else 3, img_size, img_size), device=device)
+
     if debug:
         print("\nSampling Progress:")
         print("-" * 50)
-    
+    timesteps_used = list(scheduler.timesteps)
     # Sampling loop
     for t in scheduler.timesteps:
         with torch.no_grad():
@@ -100,8 +105,6 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
             step_output = scheduler.step(noise_pred, t, x)
             x = step_output.prev_sample
             
-            # Ensure values stay mostly negative for black appearance
-            x = x - x.mean(dim=(2,3), keepdim=True)
             
             if debug and t % 100 == 0:
                 print(f"Step {t:3d}/{scheduler.timesteps[0]}: min={x.min():6.3f}, max={x.max():6.3f}")
@@ -111,8 +114,9 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
         print(f"Final range: [{x.min():6.3f}, {x.max():6.3f}]")
     
     # Ensure final output has proper contrast
-    x = torch.tanh(x)  # Squash to [-1, 1]
-    return x.cpu()
+    samples_cpu = x.cpu()
+    timesteps_tensor = torch.tensor(timesteps_used, dtype=torch.long, device=device).cpu()
+    return samples_cpu, timesteps_tensor
 
 
 def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device, max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,img_size=28, Test=True):
@@ -161,12 +165,12 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device, ma
             if epochs % fid_epoch_calc == 0 and calculate_fid_score:
                 if batches <= max_batches:
                     # Generate samples matching the batch
-                    generated_samples = sample_images(
+                    generated_samples, timesteps_tensor = sample_images(
                         model, noise_scheduler, img_size, device, 
                         n=images.shape[0], Test=Test, debug=False, 
                         labels=labels, num_classes=10
-                    ).to(device)
-                    
+                    )
+                    generated_samples = generated_samples.to(device)
                     # Calculate FID for this batch
                     fid = calculate_fid(images, generated_samples)
                     fid_scores.append(fid)
@@ -366,3 +370,9 @@ def save_with_retry(save_func, *args, **kwargs):
             save_func(*args, **kwargs)  # Retry after creating directory
         else:
             raise e  # Re-raise if we can't determine the path
+        
+def timesteps_to_str(ts, max_items=20):
+    lst = list(ts.tolist())
+    if len(lst) > max_items:
+        return ", ".join(map(str, lst[:max_items])) + ", ..."
+    return ", ".join(map(str, lst))
