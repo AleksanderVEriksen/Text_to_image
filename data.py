@@ -3,7 +3,7 @@ from torchvision import transforms
 from torchvision.datasets import MNIST
 import torch
 
-transformed = transforms.Compose([
+MNIST_TRANSFORM = transforms.Compose([
     transforms.Resize((32, 32)),
     transforms.ToTensor(),
     transforms.Lambda(lambda x: 2 * x - 1)
@@ -41,16 +41,16 @@ def get_dataset(train:bool=True, test:bool=False, val: bool=False):
 
 def get_mnist_dataset(train:bool=True, augment:bool=False):
     
-    transform = transformed
     if augment:
         transform_list = [transforms.ToTensor()]
         transform_list = [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
         ] + transform_list
-        transform = transforms.Compose(transform_list)
-
-    dataset = MNIST(root='./data', train=train, download=True, transform=transform)
+        aug_transform = transforms.Compose(transform_list)
+        dataset = MNIST(root='./data', train=train, download=True, transform=aug_transform)
+    else:
+        dataset = MNIST(root='./data', train=train, download=True, transform=MNIST_TRANSFORM)
     return dataset
 
 def estimate_dataset_stats(dataloader, max_batches=20, device='cpu'):

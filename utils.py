@@ -260,6 +260,10 @@ def calculate_fid(real_images, generated_images, device='cuda', show_progress=Fa
         show_progress (bool): enable tqdm
         chunk_size (int): batch size for feature extraction
     """
+    # Expect both in [0,1]
+    assert real_images.min() >= -0.01 and real_images.max() <= 1.01
+    assert generated_images.min() >= -0.01 and generated_images.max() <= 1.01
+
     inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1,
                              transform_input=False).to(device)
     inception.eval()
@@ -366,7 +370,7 @@ def plot_fid(fids, fid_epochs, save_path="figures/fid_plot.png", save_json=True)
 # ---------------------------------------------------------
 def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
              max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
-             img_size=32, Test=True, show_progress=True, fid_progress=True):
+             img_size=32, show_progress=True, fid_progress=True, fid_min_samples=512):
     """Validation loop computing average loss and optional FID with progress bars."""
     import torch
     model.eval()
@@ -378,16 +382,15 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
 
     loader_iter = val_dataloader
     if show_progress:
-        loader_iter = tqdm(val_dataloader, desc="Validate", leave=False)
+        loader_iter = tqdm(val_dataloader, desc="Validate", leave=False, 
+                           position=0, dynamic_ncols=True)
 
     with torch.no_grad():
         for batch in loader_iter:
             if isinstance(batch, (list, tuple)):
-                images = batch[0]
-                labels = batch[1] if len(batch) > 1 else None
+                images = batch[0]; labels = batch[1] if len(batch) > 1 else None
             else:
-                images = batch
-                labels = None
+                images = batch; labels = None
             images = images.to(device)
             if labels is not None:
                 labels = labels.to(device).long()
@@ -397,30 +400,30 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
             noise = torch.randn_like(images)
             noisy = noise_scheduler.add_noise(images, noise, t)
             pred = model(noisy, t, labels=labels)
-            loss = loss_fn(pred, noise)
-            val_loss += loss.item()
+            val_loss += loss_fn(pred, noise).item()
             batches += 1
             if calculate_fid_score:
                 images_accum.append(images.detach().cpu())
             if max_batches and batches >= max_batches:
                 break
-
-    running_avg_loss = val_loss / max(1, batches)
+    avg_val_loss = val_loss / max(1, batches)
     do_fid = calculate_fid_score and (epochs % fid_epoch_calc == 0)
-
     if do_fid and images_accum:
         real_batch = torch.cat(images_accum, dim=0)
+        if real_batch.size(0) < fid_min_samples:
+            # Accumulate more by reusing loader until threshold (optional)
+            pass
         real_batch = (real_batch + 1) / 2  # [-1,1] -> [0,1]
-        gen_vis, _ = sample_images(model, noise_scheduler, img_size, device,
-                                   n=real_batch.shape[0], Test=Test,
-                                   labels=labels_ref if labels_ref is not None else None)
-        fid_score = calculate_fid(real_batch.to(device), gen_vis.to(device),
-                                  device=device, show_progress=fid_progress)
-
+        gen_batch, _ = sample_images(
+            model, noise_scheduler, img_size, device,
+            n=real_batch.shape[0], labels=labels_ref if labels_ref is not None else None,
+            guidance_scale=None  # unconditional for FID stability
+        )
+        fid_score = calculate_fid(real_batch.to(device), gen_batch.to(device), device=device, show_progress=fid_progress)
     return {
-        'val_loss': running_avg_loss,
-        'running_avg_loss': running_avg_loss,
-        'fid_score': fid_score
+        "val_loss": avg_val_loss,
+        "running_avg_loss": avg_val_loss,
+        "fid_score": fid_score
     }
 
 def text_to_label(label, max_num_classes: int = 10):

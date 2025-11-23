@@ -31,7 +31,6 @@ from utils import (
     validate,
     plot_losses,
     # Newly used / available helpers
-    weighted_noise_loss,  # (optional if integrating later)
 )
 # Clear cache
 gc.collect()
@@ -62,12 +61,13 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="model")
     parser.add_argument("--val_every", type=int, default=5)
     parser.add_argument("--val_max_batches", type=int, default=32)
-    parser.add_argument("--sample_every_epoch", type=int, default=50)
+    parser.add_argument("--sample_every_epoch", type=int, default=20)
     parser.add_argument("--save_every_epoch", type=int, default=10)
     parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--top_k_models", type=int, default=3)
     parser.add_argument("--fid_epoch_calc", type=int, default=50)
+    parser.add_argument("--use_weighted_snr", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     return parser.parse_args()
 # ----------------------------------------------
@@ -92,6 +92,20 @@ if __name__ == "__main__":
     img_size = 32 if Dataset == "mnist" else 64
     num_channels = 1 if Dataset == "mnist" else 3
     top_models = []
+
+    # *Add existing models in the directory to the top_models list
+    model_dir = f"./models/checkpoints/{args.batch_size}"
+    if os.path.exists(model_dir):
+        for filename in os.listdir(model_dir):
+            if filename.endswith(".pth"):
+                path = os.path.join(model_dir, filename)
+                try:
+                    ckpt = torch.load(path, map_location=device)
+                    loss = ckpt.get("loss", None)
+                    if loss is not None:
+                        top_models.append((loss, path))
+                except Exception as e:
+                    print(f"Error loading checkpoint {path}: {str(e)}")
 
     # *Handle model naming and checkpoint resumption
     if Checkpoint:
@@ -150,9 +164,9 @@ if __name__ == "__main__":
 
     # *Create the UNET model
     if args.model == "Basic":
-        model = BasicUNet(in_channels=num_channels, out_channels=num_channels, num_classes=num_classes).to(device)
+        model = BasicUNet(in_channels=num_channels, num_classes=num_classes).to(device)
     else:
-        model = UNET(in_channels=num_channels, out_channels=num_channels, num_classes=num_classes).to(device)
+        model = UNET(in_channels=num_channels, num_classes=num_classes).to(device)
 
     # *Set up optimizer, loss function, and learning rate scheduler
     optimizer = torch.optim.Adam(model.parameters(),
@@ -274,11 +288,11 @@ if __name__ == "__main__":
 
     for epoch in range(start_epoch, num_epochs):
         current_epoch += 1
-
         # train_epoch should already average over dataloader; if not, divide by len(train_dataloader)
         epoch_loss = train_epoch(
             model, train_dataloader, noise_scheduler, optimizer,
-            loss_fn, device, ema=ema, mixed_precision=True
+            loss_fn, device, ema=ema, mixed_precision=True, use_weighted_snr=True,
+            alphas_cumprod=alphas_cumprod
         )
 
         # * Validation step
@@ -318,13 +332,12 @@ if __name__ == "__main__":
 # ------------------------------------------------------------
         # Keep expensive image sampling less frequent
         if (epoch + 1) % args.sample_every_epoch == 0 or (epoch == 0):
+            print(epoch+1, args.sample_every_epoch)
             with torch.no_grad():
                 model.eval()
                 # Test reconstruction of specific digits
                 n_images = 16
                 test_labels = torch.full((n_images,), 7, device=device)  # Test multiple 7s
-                # Get batch for FID calculation
-                real_batch = next(iter(val_dataloader))[0][:n_images].to(device)
                 #ema.apply_shadow(model)
                 generated_images = sample_images(
                     model, 
@@ -342,6 +355,7 @@ if __name__ == "__main__":
                 else:
                     generated_images = generated_images.cpu()
             # save grid
+            os.makedirs("figures/samples", exist_ok=True)
             sample_save_path = f"figures/samples/digit_7_epoch_{epoch+1 if epoch > 0 else 0}.png"
             try:
                 torchvision.utils.save_image(
@@ -419,6 +433,12 @@ if __name__ == "__main__":
 
     print(f"\nBest model saved with loss {best_loss:.4f}")
 
+    # Sampling block (unconditional preview first):
+    uncond_preview, _ = sample_images(
+    model, noise_scheduler, img_size, device,
+    n=16, labels=None, guidance_scale=None
+    )
+    torchvision.utils.save_image(uncond_preview, f"figures/samples/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
 
     # Also save a separate file with EMA weights applied to the model (for easy inference)
     ema_save_path = f"{save_dir}/{model_name}_EMA{'_test' if Dataset == 'mnist' else ''}.pth"

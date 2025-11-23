@@ -1,6 +1,7 @@
 /__pycache__
 /venv
-/figures/samples
+/figures/samples/*
+!figures/samples/.keep
 /.vscode
 /__pycache__
 /mnist

@@ -46,15 +46,9 @@ EMA = args.EMA
 img_size = 32 if Test else 64
 set_global_seed(42)
 
-
-def load_config_for_batch(batch_size):
+def load_config(batch_size):
     path = f"models/{batch_size}/config.json"
-    if not os.path.isfile(path):
-        print(f"No config.json at {path}")
-        return {}
-    with open(path, "r") as f:
-        cfg = json.load(f)
-    return cfg
+    return json.load(open(path)) if os.path.isfile(path) else {}
 
 # ----------------------------------------------
 if Checkpoint:
@@ -62,7 +56,7 @@ if Checkpoint:
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
             sys.exit(1)
 
-        ckpt_path = f"models/checkpoints/{args.model_name}.pth"
+        ckpt_path = f"models/checkpoints/{batch_size}/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: Checkpoint file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
@@ -72,7 +66,7 @@ if EMA:
             print("Warning: --EMA set but no --model_name provided. Exiting.")
             sys.exit(1)
 
-        ckpt_path = f"models/EMA/{args.model_name}.pth"
+        ckpt_path = f"models/{batch_size}/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: EMA file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
@@ -116,16 +110,13 @@ ema = ExponentialMovingAverage(model, decay=0.9999)
 
 
 # After parsing args and before model init:
-cfg = load_config_for_batch(batch_size)
+cfg = load_config(args.batch_size)
 if cfg:
-    # Optional assertions
-    if "num_classes" in cfg and cfg["num_classes"] != num_classes:
-        print(f"[warn] num_classes mismatch: config {cfg['num_classes']} vs arg {num_classes}")
-    if "embedding_dim" in cfg and hasattr(model, "embedding_dim") and model.embedding_dim != cfg["embedding_dim"]:
-        print(f"[warn] embedding_dim mismatch: config {cfg['embedding_dim']} vs model {model.embedding_dim}")
-    # Enforce img_size if present
-    img_size = cfg.get("img_size", img_size)
-    max_timesteps = cfg.get("max_timesteps", max_timesteps)
+    img_size = cfg.get("img_size", 32)
+    max_timesteps = cfg.get("max_timesteps", args.max_timesteps)
+else:
+    img_size = 32
+    max_timesteps = args.max_timesteps
 
 # Use cfg-driven max_timesteps for scheduler if needed:
 # noise_scheduler = DDPMScheduler(num_train_timesteps=max_timesteps, ...)
@@ -153,6 +144,8 @@ noise_scheduler = DDPMScheduler(
 )
 # For diffusers sampling, set timesteps for inference (optionally different inference steps)
 noise_scheduler.set_timesteps(max_timesteps)   # important
+
+assert img_size == 32, "Mismatch: model trained on 32x32 expected."
 
 # fetch a batch from test dataloader
 batch = next(iter(test_dataloader))
@@ -247,8 +240,8 @@ axs[3].imshow(tensor_grid_to_numpy(denoised_vis, nrow=min(8, denoised_vis.shape[
 axs[3].axis('off')
 
 plt.subplots_adjust(hspace=0.35)
-os.makedirs("figures", exist_ok=True)
-plt.savefig(f"figures/eval_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
+plt.savefig(f"figures/eval/{batch_size}/eval_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -276,7 +269,7 @@ plt.figure(figsize=(6, 6))
 plt.title(f"Generated Samples from Pure Noise, label=7", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
 plt.axis("off")
-plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -284,7 +277,7 @@ plt.close()
 # Single-step generation test (debug)
 with torch.no_grad():
     t = torch.tensor([max_timesteps - 1], device=device, dtype=torch.long)  # use last training timestep
-    x = torch.randn((1, in_ch, 28, 28), device=device)
+    x = torch.randn((1, in_ch, img_size, img_size), device=device)
     # Add label for conditioning (e.g., generate digit 7)
     label = torch.tensor([7], device=device)  # Change number as needed
     eps = model(x, t, labels=label)
@@ -331,8 +324,8 @@ plt.figure(figsize=(6, 3))
 plt.title(f"Denoised Samples (x0) for label=7\n(timesteps ≤300 listed: {ts_str_subset})", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if samples_vis.shape[1] == 1 else None)
 plt.axis('off')
-os.makedirs("figures", exist_ok=True)
-plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
+os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
+plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
 plt.close()
 
 

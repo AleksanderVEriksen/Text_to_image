@@ -91,14 +91,9 @@ def load_model(model, batch_size, model_name, device):
     return False
 
 import json, os
-
-def load_config_for_batch(batch_size):
+def load_config(batch_size):
     path = f"models/{batch_size}/config.json"
-    if not os.path.isfile(path):
-        print(f"No config.json at {path}")
-        return {}
-    with open(path, "r") as f:
-        return json.load(f)
+    return json.load(open(path)) if os.path.isfile(path) else {}
 
 def main():
     args = parse_args()
@@ -118,33 +113,29 @@ def main():
     # Load model weights using the helper function
     load_model(model, args.batch_size, args.model_name, device)
 
-    scheduler = DDPMScheduler(
-    num_train_timesteps=args.timesteps,
+    cfg = load_config(args.batch_size)
+    if cfg:
+        if "num_classes" in cfg and cfg["num_classes"] != args.num_classes:
+            print(f"[warn] num_classes mismatch config={cfg['num_classes']} arg={args.num_classes}")
+        img_size = cfg.get("img_size", args.img_size)
+        max_timesteps = cfg.get("max_timesteps", args.timesteps)
+
+    noise_scheduler = DDPMScheduler(
+    num_train_timesteps=max_timesteps,
     beta_schedule="scaled_linear",
     beta_start=0.0001,
     beta_end=0.02,
     clip_sample=True
 )
-    scheduler.set_timesteps(args.timesteps)
+    noise_scheduler.set_timesteps(args.timesteps)
 
-
-    # After args parsed:
-    cfg = load_config_for_batch(args.batch_size)
-    if cfg:
-        img_size = cfg.get("img_size", 32)
-        max_timesteps = cfg.get("max_timesteps", 1000)
-        num_classes = cfg.get("num_classes", args.num_classes)
-        if num_classes != args.num_classes:
-            print(f"[info] Overriding num_classes from {args.num_classes} -> {num_classes} (config)")
-        # Rebuild scheduler if mismatch
-        if max_timesteps != noise_scheduler.config.num_train_timesteps:
-            noise_scheduler = DDPMScheduler(num_train_timesteps=max_timesteps)
+    assert img_size == 32, f"Expected 32 for trained MNIST UNET, got {img_size}"
 
     model.eval()
     with torch.no_grad():
         labels = parse_label_string(args.label, num_classes, args.num_samples, device)
         samples, timesteps_tensor = sample_images(model, 
-                                                scheduler, 
+                                                noise_scheduler, 
                                                 img_size= img_size, 
                                                 device=device, 
                                                 n=args.num_samples, 
