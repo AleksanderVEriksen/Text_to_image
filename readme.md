@@ -1,100 +1,206 @@
 # Text-to-Image
 
-This project will try to create a text-to-image model using the dataset text-to-image-2m from Hugging Face.
+This project trains a diffusion (DDPM) UNet to denoise images conditioned on class labels, then generates samples (optionally with classifier‑free guidance) and will later extend toward full text-to-image.
 
-The process involves creating a network from scratch using PyTorch, train the model, and then try to generate an image based on a simple text prompt.
+## Dataset
 
-## The dataset
+Images (custom WebDataset or MNIST) plus optional textual/label conditioning. MNIST is internally resized to 32×32; custom data can be 64×64.
 
-The dataset consist of prompts that describes images, and the image itself.
+## PyTorch with CUDA
 
-## PyTorch with Cuda enabled
+Training uses PyTorch, mixed precision (AMP), optional EMA weights, and a DDPM noise scheduler.
 
-PyTorch will be utilized to create a UNET model as well as training the model. It will also be used to enable training on a GPU, which will make the training time faster.
+## File Structure (Core)
 
-## File structure
+### data.py
 
-The files are divided into tasks that is needed to be done in order to train the model. The files are data, model, utils, playground, train and eval.
+Loads and transforms datasets (MNIST resized to 32×32 and scaled to [-1,1]; custom dataset hook). Provides helper accessors.
 
-- The file Data prepares the data by fetching it from HuggingFace, and then loading it for usage.
-- Model is used to create the UNET model
-- utils are several helper functions used in different files which prevent code redundancy
-- playground is used to inspect and analyze the dataset, wit h the help of helper functions explained previously
-- train is used to train the model with the noisy images from the dataset
-- eval is used to evaluate the trained/saved models
+### model.py
 
-## How to run
+Defines UNET and BasicUNet with sinusoidal time embeddings, label embeddings, and optional classifier‑free guidance (guidance_scale during sampling).
 
-Commands to use to run this program. Args for train and eval are not necessary, but should be used if one want to train or eval on custom configurations. Only **epochs** for *train.py* should be considered at all times due to how it affect the learning of the model.
+### utils.py
 
-### Go into venv
+Grouped helper functions: seeding, checkpoints, sampling (forward diffusion reversal), SNR-weighted loss, FID with progress bars, plotting, validation, etc.
 
-``./venv/Scripts/Activate``
+### train.py
 
-### Run train
+Full training loop: DDPM noise addition, UNet noise prediction, SNR-weighted loss option, periodic validation, FID scheduling, sample grid saving, EMA maintenance, config.json writing.
 
-`Commands: python train.py`
+### eval.py
 
-- `Args:`
-  - `--batch_size` (default: 32) - Training batch size
-  - `--epochs` (default: 200) - Number of training epochs
-  - `--max_timesteps` (default: 1000) - Number of diffusion timesteps
-  - `--num_classes` (default: 10) - Number of label classes for conditioning
-  - `--img_size` (default: 28) - Image size (assumes square)
-  - `--model` (default: "UNET", choices: ['UNET', 'Basic']) - Model architecture to use
-  - `--model_name` (default: "model") - Name for saving/loading model
-  - `--test` (flag) - Use MNIST dataset for testing
-  - `--checkpoint` (flag) - Resume from checkpoint
-  - `--save_every` (default: 5) - Save checkpoint every N epochs
-  - `--sample_every` (default: 2) - Generate samples every N epochs
-  - `--lr` (default: 5e-5) - Initial learning rate
-  - `--weight_decay` (default: 0.01) - Weight decay for optimizer
+Evaluates a saved model: loads weights/config, runs a forward corruption + denoising illustration, generates conditional sample grids, optional classifier‑free guidance.
 
-### Run eval
+### generate_from_text.py
 
-`Commands: python eval.py`
+Generates images from a label string (“7”, “one two”, “all”), loads config.json to align hyperparameters, supports guidance_scale for sharper conditional results, saves a grid.
 
-- `Args:`
-  - `--batch_size` (default: 32) - Batch size for evaluation
-  - `--max_timesteps` (default: 1000) - Number of diffusion timesteps
-  - `--num_classes` (default: 10) - Number of label classes for conditioning
-  - `--img_size` (default: 28) - Image size (assumes square)
-  - `--model` (default: "UNET", choices: ['UNET', 'Basic']) - Model architecture to use
-  - `--model_name` (default: "model") - Name of model to load
-  - `--test` (flag) - Use MNIST dataset for testing
-  - `--checkpoint` (flag) - Load from checkpoint
-  - `--EMA` (flag) - Use EMA weights for evaluation
-  - `--num_samples` (default: 16) - Number of samples to generate
-  - `--save_path` (default: "figures") - Path to save evaluation results
+### ema.py
 
-## Goal
+Exponential moving average wrapper for stabilizing inference weights.
 
-### Required
+## Removed
 
-    - Requires VAE (compress input, then decode it back)
-    - Tokenizer and encoder (text string into numerical representation)
-    - UNET (numeric representation can be feed into UNET as conditioning )
-    - Noise Scheduler (PNDMScheduler, LMSDiscreteScheduler)
+playground (previous exploratory file) is no longer listed.
 
-#### Step 1
+## Configuration (config.json)
 
-The first goal will be to apply noise to the images, then learn a UNET model to predict the noise level an image contain, so it can de-noise it later.
+Written once per training run (models/<batch_size>/config.json) recording: version, batch_size, model, embedding_dim, num_classes, max_timesteps (and optionally img_size). eval.py and generate_from_text.py load it to:
 
-#### Step 2
+- Warn on mismatches (e.g. num_classes).
+- Override img_size / max_timesteps if present.
+Keep this file with checkpoints for reproducibility.
 
-Create a UNET that takes in "timesteps" in order to predict the denoise level of an image.
+## How to Run
 
-#### Step 3
+Activate venv:
 
-Adjust noise level for proper predictions
+```python
+./venv/Scripts/Activate
+```
 
-#### Step 4
+### Train
 
-Add conditional prediction to UNET by adding labels.
+Basic command:
 
-#### Step 5
+```python
+python train.py
+```
 
-Add sampler to reconstruct images from noise to test the model
+Key arguments (see train.py parse_args):
+
+- --batch_size (int, default 32): Training batch size (also folder key for weights).
+- --epochs (int, default 100): Total training epochs.
+- --max_timesteps (int, default 1000): Diffusion steps (DDPM).
+- --dataset {mnist|custom} (default mnist): Dataset source. mnist auto-resizes to 32×32.
+- --model {UNET|Basic} (default UNET): Architecture choice.
+- --num_classes (int, default 10): Label class count.
+- --checkpoint (flag): Resume from models/checkpoints/<batch_size>/<model_name>.pth.
+- --model_name (str): Base filename for saving (e.g. best_model).
+- --val_every (int, default 5): Validation frequency (epochs).
+- --val_max_batches (int, default 32): Cap validation batches processed.
+- --sample_every_epoch (int, default 50): Generate sample grid on schedule (also at epoch 0).
+- --save_every_epoch (int, default 10): Periodic checkpoint saving cadence.
+- --augment (flag): Enable data augmentation for MNIST (if implemented in data.py).
+- --patience (int, default 5): Early stopping patience on FID stagnation.
+- --top_k_models (int, default 3): Keep only lowest-loss recent checkpoints.
+- --fid_epoch_calc (int, default 50): Epoch interval to compute FID (set smaller for more frequent).
+- --seed (int, default 42): Reproducibility.
+
+Implicit:
+
+- img_size chosen by dataset (32 for MNIST, 64 for custom).
+- EMA automatically maintained (decay 0.9999).
+- config.json saved under models/<batch_size>/.
+
+### Eval
+
+```python
+python eval.py --batch_size 32 --model UNET --model_name best_model --test
+```
+
+Arguments:
+
+- --batch_size: Must match folder used during training.
+- --max_timesteps: Override diffusion steps if not using config.json.
+- --test (flag): Use MNIST evaluation path.
+- --checkpoint (flag): Load from checkpoints/<batch_size>/<model_name>.pth.
+- --EMA (flag): Load EMA weights instead of raw.
+- --model {UNET|Basic}
+- --model_name (str)
+- --num_classes (int)
+- --guidance_scale (float): Enable classifier‑free guidance (higher ~ stronger conditioning).
+Reads config.json to reconcile num_classes, max_timesteps, img_size.
+
+### Generate From Text / Labels
+
+```python
+
+python generate_from_text.py --label "seven" --model UNET --model_name best_model --batch_size 32 --guidance_scale 3.0
+```
+
+Arguments:
+
+- --model_name: Saved weights base file.
+- --model {UNET|Basic}
+- --label: Single or multi-label string (“7”, “one three”, “2,5,9”, “all”).
+- --num_samples (default 16): Grid size.
+- --num_classes (default 10)
+- --img_size (default 28, overridden by config if present).
+- --timesteps (default 1000): Rebuilt scheduler steps (overridden by config).
+- --out (default generated.png): Output image file path.
+- --batch_size: Folder key for locating weights/config.
+- --guidance_scale: Enable classifier‑free guidance (e.g. 0 = none, 1–5 typical range).
+Behavior:
+- Parses label string into indices.
+- Tiles/repeats to match num_samples.
+- Loads config.json to adjust hyperparameters.
+- Generates final denoised samples from pure noise.
+
+## Diffusion Process
+
+1. Forward: Add Gaussian noise at random timesteps.
+2. Model predicts noise ε conditioned on (t, label).
+3. Reverse (sampling): Iterate scheduler.timesteps, remove predicted noise.
+4. Optional guidance: Run conditional + null labels; blend outputs.
+
+## Guidance (Classifier-Free)
+
+Enabled by:
+
+- Training-time label dropout.
+- Inference guidance_scale > 0.
+Formula:
+
+```math
+ε = ε_uncond + guidance_scale * (ε_cond - ε_uncond)
+```
+
+Higher scale sharpens class fidelity but may reduce diversity.
+
+## FID Computation
+
+- Collected every fid_epoch_calc epochs (or adjust to more frequent).
+- Real images remapped from [-1,1] to [0,1].
+- InceptionV3 avgpool features → Fréchet distance.
+
+## EMA
+
+Maintains smoothed parameter copies for better sample quality:
+
+- Apply for inference (ema.apply_shadow).
+- Restore afterward (ema.restore) if needed.
+
+## Goals (Incremental)
+
+1. Noise prediction baseline (done).
+2. Time embedding integration (done).
+3. Conditional label guidance (done).
+4. Classifier-free guidance (done).
+5. Larger dataset + textual encoder (future).
+6. VAE + tokenizer for full prompt conditioning (planned).
+
+## Run Tips
+
+- Lower fid_epoch_calc for faster feedback (e.g., 10 or equal to val_every).
+- Use guidance_scale 2–4 for sharper digits.
+- Maintain consistent batch_size folder across train/eval/generate.
+
+## Example
+
+Generate digit ‘7’ with guidance:
+
+```python
+python generate_from_text.py --label 7 --model UNET --model_name best_model --batch_size 32 --guidance_scale 3
+```
+
+## Troubleshooting
+
+- Shape mismatch (28 vs 16): Ensure MNIST resized to 32×32 or re-enable output interpolation.
+- FID always None: Reduce --fid_epoch_calc.
+- Weights not found: Check models/<batch_size>/ directory and model_name correctness.
+- Guidance ineffective: Confirm label dropout active during training; ensure guidance_scale passed at generation.
 
 ## Tests
 
