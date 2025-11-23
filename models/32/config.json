@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "batch_size": 32,
+  "model": "UNET",
+  "embedding_dim": 512,
+  "num_classes": 10,
+  "max_timesteps": 1000
+}

@@ -1,36 +1,94 @@
 import matplotlib.pyplot as plt
-from diffusers import DDPMScheduler
-import torch
-import torchvision
 from torchvision import transforms
-import PIL.Image
-from tqdm.auto import tqdm
-import numpy as np
-import os
+import numpy as np, os, torch, torchvision, scipy.linalg, PIL.Image
+from torchvision.models import inception_v3, Inception_V3_Weights
 import torch.nn.functional as F
-from torchvision.models import inception_v3
+from tqdm.auto import tqdm
 
-
-# Definer transformasjoner én gang
+# Defines the transformation to convert images to tensors normalized to [-1, 1]
 transform = transforms.Compose([
-    transforms.ToTensor(),           # convert to tensor and normalize to [0,1]
-    transforms.Lambda(lambda x: 2 * x - 1)  # normalize to [-1, 1]
+    transforms.Resize((32, 32)),     # Added: ensure 32x32 so 2^5 downsamples align
+    transforms.ToTensor(),           # [0,1]
+    transforms.Lambda(lambda x: 2 * x - 1)  # [-1,1]
 ])
 
-# Load image to tensor
-def load_single_img_to_tensor(dataset):
-    sample = next(iter(dataset))
-    image = sample['jpg']
-    image = transform(image)  # (C, H, W), normalisert til [0, 1]
-    return image
+# =========================================================
+# utils.py
+# Grouped utility functions with clarifying comments.
+# Sections:
+# 1. Seeding / Reproducibility
+# 2. File & Checkpoint Helpers
+# 3. Data / Dataloader Helpers
+# 4. Sampling & Snapshot Functions
+# 5. Loss / SNR Weighting
+# 6. Metrics (FID)
+# 7. Plotting
+# 8. Misc / Validation Loop
+# =========================================================
 
-# Load dataset of images to tensor
-def sample_to_tensor(sample):
-    if isinstance(sample, dict):
-        return transform(sample['jpg'])
-    else:
-        return transform(sample[0])
-    
+# ---------------------------------------------------------
+# 1. Seeding / Reproducibility
+# ---------------------------------------------------------
+def set_global_seed(seed: int):
+    """Set seeds for Python, NumPy, Torch (CPU/CUDA) for reproducibility."""
+    import random, numpy as np, torch
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = False
+    torch.backends.cudnn.benchmark = True
+
+# ---------------------------------------------------------
+# 2. File & Checkpoint Helpers
+# ---------------------------------------------------------
+def save_with_retry(path, obj, retries=3):
+    """Save torch object with simple retry mechanism (handles transient IO errors)."""
+    import torch, time, os
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    for attempt in range(1, retries + 1):
+        try:
+            torch.save(obj, path)
+            return True
+        except Exception as e:
+            if attempt == retries:
+                print(f"Failed saving {path}: {e}")
+                return False
+            time.sleep(0.5 * attempt)
+
+def save_config(config_dict, path):
+    """Persist a JSON config dictionary to disk."""
+    import json, os
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump(config_dict, f, indent=2)
+
+def load_model_weights(model, model_name, batch_size, device, use_checkpoint=False, use_ema=False, strict=True):
+    """Load model weights from possible candidate paths (EMA / checkpoint / base)."""
+    import os, torch
+    candidates = []
+    if use_ema:
+        candidates.append(f"models/{batch_size}/{model_name}_EMA_test.pth")
+    if use_checkpoint:
+        candidates.append(f"models/checkpoints/{batch_size}/{model_name}.pth")
+    candidates.append(f"models/{batch_size}/{model_name}.pth")
+    for p in candidates:
+        if not os.path.isfile(p):
+            continue
+        try:
+            ckpt = torch.load(p, map_location=device)
+            state = ckpt.get("model_state_dict", ckpt) if isinstance(ckpt, dict) else ckpt
+            model.load_state_dict(state, strict=strict)
+            print(f"Loaded weights: {p}")
+            return ckpt if isinstance(ckpt, dict) else {}
+        except Exception as e:
+            print(f"Failed {p}: {e}")
+    print("No weights loaded.")
+    return None
+
+# ---------------------------------------------------------
+# 3. Data / Dataloader Helpers
+# ---------------------------------------------------------
 def collate_fn(batch):
     images = []
     labels = []
@@ -60,9 +118,311 @@ def collate_fn(batch):
                         for l in labels], dtype=torch.long)
     return images, labels
 
+def estimate_dataset_stats(dataloader, max_batches=20, device='cpu'):
+    """Estimate mean and variance over a limited number of batches."""
+    import torch
+    cnt = 0
+    mean = 0
+    M2 = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            imgs = batch[0] if isinstance(batch, (list, tuple)) else batch
+            imgs = imgs.to(device).float()
+            batch_mean = imgs.mean()
+            batch_var = imgs.var()
+            delta = batch_mean - mean
+            cnt += 1
+            mean += delta / cnt
+            M2 += batch_var
+            if cnt >= max_batches:
+                break
+    return {"approx_mean": float(mean), "approx_var": float(M2 / max(1, cnt))}
 
-# Sample generated images
-# use scheduler.set_timesteps(...) before calling this
+# ---------------------------------------------------------
+# 4. Sampling & Snapshot Functions
+# ---------------------------------------------------------
+def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=False,
+                labels=None, num_classes=10, return_intermediates=False, guidance_scale=None):
+    """Generate n final denoised samples (optionally capture intermediates)."""
+    model.eval()
+    with torch.no_grad():
+        x = torch.randn(n, model.in_channels, img_size, img_size, device=device)
+        if labels is not None:
+            if isinstance(labels, int):
+                labels = torch.full((n,), labels, dtype=torch.long, device=device)
+            elif isinstance(labels, torch.Tensor):
+                labels = labels.to(device).view(-1).long()
+                if labels.shape[0] != n:
+                    labels = labels.repeat(n)[:n]
+        intermediates = []
+        # FIX: iterate over scheduler.timesteps (tensor) not integer
+        for t in scheduler.timesteps:
+            t_scalar = int(t.item()) if hasattr(t, "item") else int(t)
+            eps = model(x, torch.tensor([t_scalar] * n, device=device),
+                        labels=labels, guidance_scale=guidance_scale)
+            step_out = scheduler.step(eps, t, x)
+            x = step_out.prev_sample
+            if return_intermediates:
+                intermediates.append(x.detach().clone())
+        x0 = x.detach()
+        minv, maxv = float(x0.min()), float(x0.max())
+        if minv >= -1.2 and maxv <= 1.2:
+            vis = ((x0 + 1) / 2).clamp(0, 1)
+        elif 0.0 <= minv and maxv <= 1.0:
+            vis = x0.clamp(0, 1)
+        elif maxv <= 255.0:
+            vis = (x0 / 255.0).clamp(0, 1)
+        else:
+            vis = (x0 - minv) / (maxv - minv + 1e-8)
+            vis = vis.clamp(0, 1)
+        ts_used = scheduler.timesteps.clone().detach()
+        if return_intermediates:
+            return vis, ts_used, intermediates
+        return vis, ts_used
+
+def sample_snapshots_by_t(model, scheduler, img_size, device, *, in_channels=1,
+                        labels=None, timesteps_subset=None, seed=None):
+    """Capture intermediate x_t states for a single sample at specified timesteps."""
+    import torch
+    model.eval()
+    gen = torch.Generator(device=device)
+    if seed is not None:
+        gen.manual_seed(seed)
+    x = torch.randn((1, in_channels, img_size, img_size), device=device, generator=gen)
+    snapshots, taken_ts = [], []
+    if labels is not None:
+        if isinstance(labels, int):
+            labels = torch.tensor([labels], dtype=torch.long, device=device)
+        elif isinstance(labels, torch.Tensor):
+            labels = labels.to(device).view(1).long()
+        else:
+            raise TypeError("labels must be int or tensor for snapshots.")
+    wanted = set(int(t) for t in (timesteps_subset or []))
+    with torch.no_grad():
+        for t in scheduler.timesteps:
+            t_int = int(t.item()) if hasattr(t, "item") else int(t)
+            eps = model(x, torch.tensor([t_int], device=device), labels)
+            step_out = scheduler.step(eps, t, x)
+            x = step_out.prev_sample
+            if t_int in wanted:
+                snapshots.append(x.detach().clone())
+                taken_ts.append(t_int)
+    if not snapshots:
+        return torch.empty(0, in_channels, img_size, img_size, device=device), torch.tensor([], dtype=torch.long)
+    return torch.cat(snapshots, dim=0), torch.tensor(taken_ts, dtype=torch.long, device=device)
+
+def sample_intermediates(model, scheduler, img_size, device, n=1, in_channels=1, labels=None, capture_ts=None):
+    """Return (snapshots, captured_timesteps) for one sample along the denoising path."""
+    model.eval()
+    x = torch.randn((n, in_channels, img_size, img_size), device=device)
+    out_imgs = []
+    out_ts = []
+    wanted = set(int(t) for t in (capture_ts or []))
+    with torch.no_grad():
+        for t in scheduler.timesteps:
+            t_int = int(t.item())
+            eps = model(x, torch.tensor([t_int], device=device), labels)
+            step = scheduler.step(eps, t, x)
+            x = step.prev_sample
+            if t_int in wanted:
+                out_imgs.append(x.detach().clone())
+                out_ts.append(t_int)
+    if not out_imgs:
+        return torch.empty(0, in_channels, img_size, img_size), torch.tensor([], dtype=torch.long)
+    return torch.cat(out_imgs, dim=0), torch.tensor(out_ts, dtype=torch.long, device=device)
+
+# ---------------------------------------------------------
+# 5. Loss / SNR Weighting
+# ---------------------------------------------------------
+def compute_snr(alphas_cumprod, timesteps):
+    """Compute SNR = alpha_cumprod / (1 - alpha_cumprod) for given timesteps."""
+    a = alphas_cumprod[timesteps]
+    return a / (1 - a)
+
+def weighted_noise_loss(eps_pred, eps_target, alphas_cumprod, timesteps, min_snr_gamma=5.0):
+    """Apply SNR-based weighting to noise prediction MSE to balance timestep difficulty."""
+    import torch
+    snr = compute_snr(alphas_cumprod, timesteps)
+    w = (snr.clamp(max=min_snr_gamma) / snr)
+    loss = (w * (eps_pred - eps_target).pow(2).mean(dim=(1, 2, 3))).mean()
+    return loss
+
+# ---------------------------------------------------------
+# 6. Metrics (FID)
+# ---------------------------------------------------------
+def calculate_fid(real_images, generated_images, device='cuda', show_progress=False, chunk_size=64):
+    """Compute Fréchet Inception Distance between real and generated batches.
+    If show_progress=True, display a tqdm bar over feature extraction.
+    Args:
+        real_images (Tensor): (N,C,H,W) in [0,1]
+        generated_images (Tensor): (N,C,H,W) in [0,1]
+        device: torch device
+        show_progress (bool): enable tqdm
+        chunk_size (int): batch size for feature extraction
+    """
+    inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1,
+                             transform_input=False).to(device)
+    inception.eval()
+
+    def prep(imgs):
+        imgs = F.interpolate(imgs, size=(299, 299), mode='bilinear', align_corners=False)
+        if imgs.shape[1] == 1:
+            imgs = imgs.repeat(1, 3, 1, 1)
+        imgs = torch.clamp(imgs, 0, 1)
+        mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(1, 3, 1, 1)
+        std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(1, 3, 1, 1)
+        return (imgs - mean) / std
+
+    def collect_features(imgs):
+        feats = []
+        handle = inception.avgpool.register_forward_hook(lambda m,i,o: feats.append(o.flatten(1)))
+        iterator = range(0, imgs.shape[0], chunk_size)
+        if show_progress:
+            iterator = tqdm(iterator, desc="FID features", leave=False)
+        with torch.no_grad():
+            for start in iterator:
+                batch = imgs[start:start+chunk_size].to(device)
+                inception(prep(batch))
+        handle.remove()
+        return torch.cat(feats, dim=0).cpu().numpy()
+
+    real_feats = collect_features(real_images)
+    gen_feats  = collect_features(generated_images)
+
+    mu_r, mu_g = real_feats.mean(0), gen_feats.mean(0)
+    sigma_r = np.cov(real_feats, rowvar=False)
+    sigma_g = np.cov(gen_feats, rowvar=False)
+    diff = mu_r - mu_g
+    covmean = scipy.linalg.sqrtm(sigma_r.dot(sigma_g))
+    if np.iscomplexobj(covmean):
+        covmean = covmean.real
+    fid = diff.dot(diff) + np.trace(sigma_r + sigma_g - 2 * covmean)
+    return float(fid)
+
+# ---------------------------------------------------------
+# 7. Plotting
+# ---------------------------------------------------------
+def plot_losses(train_epochs, train_losses, val_epochs, val_losses, running_avg_losses, save_path="figures/loss_plot.png"):
+    """Plot training & validation loss curves along with running average."""
+    import os, matplotlib.pyplot as plt
+    if not train_losses and not val_losses:
+        print("No loss data to plot.")
+        return
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.figure(figsize=(10, 5))
+    if train_losses:
+        plt.plot(train_epochs, train_losses, label='Train Loss')
+    if val_losses:
+        plt.plot(val_epochs, val_losses, label='Val Loss')
+    if running_avg_losses:
+        plt.plot(val_epochs, running_avg_losses, label='Running Avg Loss')
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Loss Curves")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Loss plot saved to {save_path}")
+
+def plot_fid(fids, fid_epochs, save_path="figures/fid_plot.png", save_json=True):
+    """Plot FID values over epochs with color-coded segments; optionally save JSON."""
+    import os, json, matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
+    if not fids:
+        print("No FID data.")
+        return
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    plt.figure(figsize=(10, 6))
+    for i in range(len(fids)):
+        color = ('green' if fids[i] < 5 else
+                'yellow' if fids[i] < 20 else
+                'orange' if fids[i] < 50 else 'red')
+        if i == 0:
+            plt.plot([fid_epochs[i]], [fids[i]], marker='o', color=color)
+        else:
+            plt.plot([fid_epochs[i - 1], fid_epochs[i]],
+                    [fids[i - 1], fids[i]], marker='o', color=color)
+    plt.xlabel("Epoch")
+    plt.ylabel("FID")
+    plt.title("FID over epochs")
+    plt.grid(alpha=0.3)
+    legend = [
+        Patch(facecolor='green', label='<5 Excellent'),
+        Patch(facecolor='yellow', label='5–20 Good'),
+        Patch(facecolor='orange', label='20–50 Acceptable'),
+        Patch(facecolor='red', label='>=50 Poor'),
+    ]
+    plt.legend(handles=legend)
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"FID plot saved to {save_path}")
+    if save_json:
+        with open(os.path.splitext(save_path)[0] + ".json", "w") as f:
+            json.dump({"epochs": fid_epochs, "fids": fids}, f, indent=2)
+
+# ---------------------------------------------------------
+# 8. Misc / Validation Loop
+# ---------------------------------------------------------
+def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
+             max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
+             img_size=32, Test=True, show_progress=True, fid_progress=True):
+    """Validation loop computing average loss and optional FID with progress bars."""
+    import torch
+    model.eval()
+    val_loss = 0.0
+    batches = 0
+    fid_score = None
+    images_accum = []
+    labels_ref = None
+
+    loader_iter = val_dataloader
+    if show_progress:
+        loader_iter = tqdm(val_dataloader, desc="Validate", leave=False)
+
+    with torch.no_grad():
+        for batch in loader_iter:
+            if isinstance(batch, (list, tuple)):
+                images = batch[0]
+                labels = batch[1] if len(batch) > 1 else None
+            else:
+                images = batch
+                labels = None
+            images = images.to(device)
+            if labels is not None:
+                labels = labels.to(device).long()
+                labels_ref = labels
+            total_steps = noise_scheduler.config.num_train_timesteps
+            t = torch.randint(0, total_steps, (images.size(0),), device=device).long()
+            noise = torch.randn_like(images)
+            noisy = noise_scheduler.add_noise(images, noise, t)
+            pred = model(noisy, t, labels=labels)
+            loss = loss_fn(pred, noise)
+            val_loss += loss.item()
+            batches += 1
+            if calculate_fid_score:
+                images_accum.append(images.detach().cpu())
+            if max_batches and batches >= max_batches:
+                break
+
+    running_avg_loss = val_loss / max(1, batches)
+    do_fid = calculate_fid_score and (epochs % fid_epoch_calc == 0)
+
+    if do_fid and images_accum:
+        real_batch = torch.cat(images_accum, dim=0)
+        real_batch = (real_batch + 1) / 2  # [-1,1] -> [0,1]
+        gen_vis, _ = sample_images(model, noise_scheduler, img_size, device,
+                                   n=real_batch.shape[0], Test=Test,
+                                   labels=labels_ref if labels_ref is not None else None)
+        fid_score = calculate_fid(real_batch.to(device), gen_vis.to(device),
+                                  device=device, show_progress=fid_progress)
+
+    return {
+        'val_loss': running_avg_loss,
+        'running_avg_loss': running_avg_loss,
+        'fid_score': fid_score
+    }
+
 def text_to_label(label, max_num_classes: int = 10):
     """Convert text/numeric label to tensor index."""
     if isinstance(label, int):
@@ -83,107 +443,6 @@ def text_to_label(label, max_num_classes: int = 10):
             if label in label_map:
                 return label_map[label]
     raise ValueError(f"Unsupported label format: {label}")
-
-def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=False, labels=None, num_classes=10):
-    """Generate images using the diffusion model."""
-    model.eval()
-    
-    # Start with black noise (negative values) instead of random noise
-    #x = -torch.abs(torch.randn((n, 1 if Test else 3, img_size, img_size), device=device))
-    
-    # Start with random noise (standard Gaussian)
-    x = torch.randn((n, 1 if Test else 3, img_size, img_size), device=device)
-
-    if debug:
-        print("\nSampling Progress:")
-        print("-" * 50)
-    timesteps_used = list(scheduler.timesteps)
-    # Sampling loop
-    for t in scheduler.timesteps:
-        with torch.no_grad():
-            noise_pred = model(x, t.expand(n).to(device), labels)
-            step_output = scheduler.step(noise_pred, t, x)
-            x = step_output.prev_sample
-            
-            
-            if debug and t % 100 == 0:
-                print(f"Step {t:3d}/{scheduler.timesteps[0]}: min={x.min():6.3f}, max={x.max():6.3f}")
-    
-    if debug:
-        print("-" * 50)
-        print(f"Final range: [{x.min():6.3f}, {x.max():6.3f}]")
-    
-    # Ensure final output has proper contrast
-    samples_cpu = x.cpu()
-    timesteps_tensor = torch.tensor(timesteps_used, dtype=torch.long, device=device).cpu()
-    return samples_cpu, timesteps_tensor
-
-
-def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device, max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,img_size=28, Test=True):
-    """Run validation loop and return loss metrics, optionally including FID score."""
-    model.eval()
-    val_loss = 0
-    running_avg_loss = 0
-    alpha = 0.1  # Smoothing factor for running average
-    batches = 0
-    fid_scores = [] if calculate_fid_score else None
-    
-    with torch.no_grad():
-        for batch in tqdm(
-                val_dataloader, 
-                desc="Validating", 
-                leave=False, 
-                dynamic_ncols=True, 
-                position=0
-                ):
-            if max_batches and batches >= max_batches:
-                break
-                
-            images, labels = batch
-            images = images.to(device)
-            labels = labels.to(device)
-            
-            # Calculate validation loss
-            timesteps = torch.randint(0, len(noise_scheduler.timesteps), 
-                                    (images.shape[0],), device=device).long()
-            
-            noise = torch.randn_like(images)
-            noisy_images = noise_scheduler.add_noise(images, noise, timesteps)
-            
-            noise_pred = model(noisy_images, timesteps, labels=labels)
-            loss = loss_fn(noise_pred, noise)
-            
-            val_loss += loss.item()
-            # Update running average
-            if batches == 0:
-                running_avg_loss = loss.item()
-            else:
-                running_avg_loss = (1 - alpha) * running_avg_loss + alpha * loss.item()
-            batches += 1
-            
-            # Optionally calculate FID for this batch every N epochs
-            if epochs % fid_epoch_calc == 0 and calculate_fid_score:
-                if batches <= max_batches:
-                    # Generate samples matching the batch
-                    generated_samples, timesteps_tensor = sample_images(
-                        model, noise_scheduler, img_size, device, 
-                        n=images.shape[0], Test=Test, debug=False, 
-                        labels=labels, num_classes=10
-                    )
-                    generated_samples = generated_samples.to(device)
-                    # Calculate FID for this batch
-                    fid = calculate_fid(images, generated_samples)
-                    fid_scores.append(fid)
-    
-    results = {
-        'val_loss': val_loss / batches,
-        'running_avg_loss': running_avg_loss
-    }
-    
-    if calculate_fid_score:
-        results['fid_score'] = np.mean(fid_scores) if fid_scores else float('inf')
-    
-    return results
 
 def tensor_grid_to_numpy(tensor, nrow=8, rescale=True):
     """Make a torchvision grid and return a float32 numpy array.
@@ -258,121 +517,22 @@ def normalize_per_sample(tensor, min_val=-1, max_val=1):
     # Reshape back
     return normalized.view(B, C, H, W)
 
-def load_model_weights(model, batch_size, model_name, device, is_test=False, is_checkpoint=False, is_ema=False):
-    """Load model weights with proper error handling and path resolution.
-    
-    Args:
-        model: The PyTorch model to load weights into
-        model_name (str): Name of the model/weights file
-        device: PyTorch device to load weights to
-        is_test (bool): If True, look in test model directory
-        is_checkpoint (bool): If True, load from checkpoints folder
-        is_ema (bool): If True, load EMA weights
-    
-    Returns:
-        dict or None: Full checkpoint dict if available, else None
-    """
-    # Determine weight path
-    if is_checkpoint:
-        path = os.path.join(f"models/{batch_size}", "checkpoints", f"{model_name}.pth")
-    elif is_ema:
-        path = os.path.join(f"models/{batch_size}", "EMA", f"{model_name}_EMA.pth")
-    else:
-        path = os.path.join(f"models/{batch_size}", f"{model_name}.pth")
-    
-    try:
-        checkpoint = torch.load(path, map_location=device)
-        if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-            model.load_state_dict(checkpoint["model_state_dict"])
-            print(f"Loaded model state from checkpoint: {path}")
-            return checkpoint
-        else:
-            model.load_state_dict(checkpoint)
-            print(f"Loaded model weights from: {path}")
-            return None
-            
-    except FileNotFoundError:
-        print(f"No weights found at {path}")
-        return None
-    except Exception as e:
-        print(f"Error loading weights from {path}: {str(e)}")
-        return None
-
-def plot_losses(train_losses, val_losses, val_every, save_path="figures/loss_curves/loss_plot.png"):
-    """Plot training and validation losses over epochs.
-    
-    Args:
-        train_losses (list): List of training losses for each epoch
-        val_losses (list): List of validation losses (every val_every epochs)
-        val_every (int): Frequency of validation (e.g., every 5 epochs)
-        save_path (str): Path to save the plot image
-    """
-    epochs = list(range(1, len(train_losses) + 1))
-    val_epochs = [i * val_every for i in range(1, len(val_losses) + 1)]
-    
-    plt.figure(figsize=(10, 6))
-    plt.plot(epochs, train_losses, label='Training Loss', color='blue', linewidth=2)
-    plt.plot(val_epochs, val_losses, label='Validation Loss', color='red', linewidth=2, marker='o')
-    
-    plt.xlabel('Epoch')
-    plt.ylabel('Loss')
-    plt.title('Training and Validation Loss Over Epochs')
-    plt.legend()
-    plt.grid(True, alpha=0.3)
-    
-    # Ensure directory exists
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    
-    plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Loss plot saved to {save_path}")
-
-def calculate_fid(real_images, generated_images, device='cuda'):
-    """Calculate Fréchet Inception Distance between real and generated images.
-    
-    Args:
-        real_images (torch.Tensor): Real images, shape (N, C, H, W)
-        generated_images (torch.Tensor): Generated images, shape (N, C, H, W)
-        device (str): Device to run calculations on
-    
-    Returns:
-        float: FID score
-    """
-    # For MNIST, use a simpler metric since InceptionV3 isn't ideal for grayscale
-    # Calculate MSE as a proxy for now (replace with proper FID later)
-    mse = F.mse_loss(real_images, generated_images).item()
-    
-    # Placeholder for proper FID implementation:
-    # - Extract features using InceptionV3
-    # - Calculate mean and covariance of features
-    # - Compute Fréchet distance
-    
-    return mse  # Return MSE for now, implement full FID when needed
-
-def save_with_retry(save_func, *args, **kwargs):
-    """Helper function to save files with automatic directory creation on failure."""
-    try:
-        save_func(*args, **kwargs)
-    except (OSError, FileNotFoundError, RuntimeError) as e:  # Add RuntimeError
-        # Extract the file path from args or kwargs
-        file_path = None
-        if args and isinstance(args[1], str):  # Common pattern: save_func(tensor, path, ...)
-            file_path = args[1]
-        elif 'path' in kwargs:
-            file_path = kwargs['path']
-        elif 'save_path' in kwargs:
-            file_path = kwargs['save_path']
-        
-        if file_path:
-            dir_path = os.path.dirname(file_path)
-            print(f"Directory not found for {file_path}, creating it: {e}")
-            os.makedirs(dir_path, exist_ok=True)
-            save_func(*args, **kwargs)  # Retry after creating directory
-        else:
-            raise e  # Re-raise if we can't determine the path
-        
 def timesteps_to_str(ts, max_items=20):
     lst = list(ts.tolist())
     if len(lst) > max_items:
         return ", ".join(map(str, lst[:max_items])) + ", ..."
     return ", ".join(map(str, lst))
+
+# Load image to tensor
+def load_single_img_to_tensor(dataset):
+    sample = next(iter(dataset))
+    image = sample['jpg']
+    image = transform(image)  # (C, H, W), normalisert til [0, 1]
+    return image
+
+# Load dataset of images to tensor
+def sample_to_tensor(sample):
+    if isinstance(sample, dict):
+        return transform(sample['jpg'])
+    else:
+        return transform(sample[0])

@@ -1,6 +1,13 @@
 from datasets import load_dataset
 from torchvision import transforms
 from torchvision.datasets import MNIST
+import torch
+
+transformed = transforms.Compose([
+    transforms.Resize((32, 32)),
+    transforms.ToTensor(),
+    transforms.Lambda(lambda x: 2 * x - 1)
+])
 
 def load_urls(urls):
     dataset = load_dataset("webdataset", data_files={"train": urls}, split="train", streaming=True)
@@ -34,17 +41,41 @@ def get_dataset(train:bool=True, test:bool=False, val: bool=False):
 
 def get_mnist_dataset(train:bool=True, augment:bool=False):
     
-    transform_list = [transforms.ToTensor()]
+    transform = transformed
     if augment:
+        transform_list = [transforms.ToTensor()]
         transform_list = [
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
         ] + transform_list
-    transform = transforms.Compose(transform_list)
+        transform = transforms.Compose(transform_list)
 
     dataset = MNIST(root='./data', train=train, download=True, transform=transform)
     return dataset
 
+def estimate_dataset_stats(dataloader, max_batches=20, device='cpu'):
+    cnt = 0
+    mean = 0
+    M2 = 0
+    pixels = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            if isinstance(batch, (list, tuple)):
+                imgs = batch[0]
+            else:
+                imgs = batch
+            imgs = imgs.to(device).float()
+            b = imgs.size(0)
+            pixels += b * imgs[0].numel()
+            batch_mean = imgs.mean()
+            batch_var = imgs.var()
+            delta = batch_mean - mean
+            cnt += 1
+            mean += delta / cnt
+            M2 += batch_var
+            if cnt >= max_batches:
+                break
+    return {"approx_mean": float(mean), "approx_var": float(M2 / cnt)}
 
 # Example of iterating through the dataset
 def show_sample_images(dataset, num_images=3):

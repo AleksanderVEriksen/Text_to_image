@@ -17,6 +17,7 @@ def parse_args():
     p.add_argument('--timesteps', type=int, default=1000)
     p.add_argument('--out', type=str, default='generated.png')
     p.add_argument('--batch_size', type=int, default=32, help='Batch size used during training (for loading correct model weights)')
+    p.add_argument("--guidance_scale", type=float, default=None)
     return p.parse_args()
 
 def parse_label_string(label_str, num_classes, num_samples, device):
@@ -89,12 +90,26 @@ def load_model(model, batch_size, model_name, device):
     print("Proceeding with random weights.\n")
     return False
 
+import json, os
+
+def load_config_for_batch(batch_size):
+    path = f"models/{batch_size}/config.json"
+    if not os.path.isfile(path):
+        print(f"No config.json at {path}")
+        return {}
+    with open(path, "r") as f:
+        return json.load(f)
 
 def main():
     args = parse_args()
+
+    img_size = args.img_size
+    max_timesteps = args.timesteps
+    num_classes = args.num_classes
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    in_ch = 1 if args.img_size <= 28 else 3
+    in_ch = 1 if img_size <= 28 else 3
     out_ch = in_ch
     print(f"Using model type: {args.model} with in/out channels: {in_ch}/{out_ch}")
     model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device) if args.model == 'Basic' else \
@@ -112,17 +127,42 @@ def main():
 )
     scheduler.set_timesteps(args.timesteps)
 
+
+    # After args parsed:
+    cfg = load_config_for_batch(args.batch_size)
+    if cfg:
+        img_size = cfg.get("img_size", 32)
+        max_timesteps = cfg.get("max_timesteps", 1000)
+        num_classes = cfg.get("num_classes", args.num_classes)
+        if num_classes != args.num_classes:
+            print(f"[info] Overriding num_classes from {args.num_classes} -> {num_classes} (config)")
+        # Rebuild scheduler if mismatch
+        if max_timesteps != noise_scheduler.config.num_train_timesteps:
+            noise_scheduler = DDPMScheduler(num_train_timesteps=max_timesteps)
+
     model.eval()
     with torch.no_grad():
-        labels = parse_label_string(args.label, args.num_classes, args.num_samples, device)
-        samples, timesteps_tensor = sample_images(model, scheduler, img_size=args.img_size, device=device, n=args.num_samples, Test=(in_ch==1), labels=labels, num_classes=args.num_classes)
+        labels = parse_label_string(args.label, num_classes, args.num_samples, device)
+        samples, timesteps_tensor = sample_images(model, 
+                                                scheduler, 
+                                                img_size= img_size, 
+                                                device=device, 
+                                                n=args.num_samples, 
+                                                Test=(in_ch==1), labels=labels, 
+                                                num_classes=num_classes,
+                                                guidance_scale=args.guidance_scale
+                                                )
 
     if isinstance(samples, torch.Tensor):
         samples = samples.cpu()
     else:
         raise TypeError('sample_images returned unexpected type')
 
-    torchvision.utils.save_image(samples, args.out, nrow=int(max(1, min(8, args.num_samples//2))), normalize=True)
+    torchvision.utils.save_image(
+        samples, 
+        args.out, 
+        nrow=int(max(1, min(8, args.num_samples//2))), 
+        normalize=True)
     print(f"Saved generated samples to {args.out}")
 
 

@@ -4,45 +4,42 @@ class ExponentialMovingAverage:
     """Simple EMA for model parameters."""
     def __init__(self, model, decay=0.9999):
         self.decay = decay
-        self.shadow = {}
-        self.backup = {}
-        # register initial shadow weights
-        for name, p in model.named_parameters():
+        self.model = model
+        # Initialize shadow (EMA) weights
+        self.shadow_params = [p.detach().clone() for p in model.parameters() if p.requires_grad]
+
+    @torch.no_grad()
+    def update(self):
+        """Update shadow params after each optimizer step."""
+        for s, p in zip(self.shadow_params, self.model.parameters()):
+            if not p.requires_grad:
+                continue
+            s.mul_(self.decay).add_(p.detach(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def apply_shadow(self, model=None):
+        """Copy EMA weights into the model (for evaluation/saving)."""
+        ref_model = model or self.model
+        for s, p in zip(self.shadow_params, ref_model.parameters()):
             if p.requires_grad:
-                self.shadow[name] = p.detach().clone()
+                p.copy_(s)
 
-    def update(self, model):
-        """Call after optimizer.step() to update EMA with current model params."""
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            new_val = p.detach().clone()
-            old = self.shadow[name]
-            # keep on same device as model param
-            self.shadow[name] = old.to(new_val.device) * self.decay + (1.0 - self.decay) * new_val
-
-    def apply_shadow(self, model):
-        """Replace model params with EMA (save originals to backup)."""
-        self.backup = {}
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            self.backup[name] = p.detach().clone()
-            p.data.copy_(self.shadow[name].to(p.device))
-
-    def restore(self, model):
-        """Restore original model params from backup."""
-        for name, p in model.named_parameters():
-            if not p.requires_grad:
-                continue
-            p.data.copy_(self.backup[name].to(p.device))
-        self.backup = {}
+    @torch.no_grad()
+    def restore(self, model=None):
+        """(No-op unless you backed up original weights before apply_shadow)."""
+        # Implement backup/restore if needed; currently apply_shadow overwrites directly.
 
     def state_dict(self):
-        # move shadow to CPU for checkpointing
-        return {k: v.detach().cpu() for k, v in self.shadow.items()}
+        """Serialize EMA state."""
+        return {
+            "decay": self.decay,
+            "shadow_params": [p.clone() for p in self.shadow_params]
+        }
 
-    def load_state_dict(self, state_dict):
-        # load shadow (assumes keys match)
-        for k, v in state_dict.items():
-            self.shadow[k] = v.clone()
+    def load_state_dict(self, state):
+        """Load EMA state."""
+        self.decay = state.get("decay", self.decay)
+        sp = state["shadow_params"]
+        assert len(sp) == len(self.shadow_params)
+        for dst, src in zip(self.shadow_params, sp):
+            dst.copy_(src)

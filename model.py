@@ -1,7 +1,26 @@
+import math
 import torch
 import torch.nn as nn
-from torch.amp import autocast
 import torch.nn.functional as F
+from torch.amp import autocast
+
+class SinusoidalTimeEmbedding(nn.Module):
+    def __init__(self, dim, max_period=10000):
+        super().__init__()
+        self.dim = dim
+        self.max_period = max_period
+
+    def forward(self, timesteps: torch.Tensor):
+        # timesteps: (B,)
+        half = self.dim // 2
+        freqs = torch.exp(
+            -math.log(self.max_period) * torch.arange(0, half, device=timesteps.device) / half
+        )
+        args = timesteps.float().unsqueeze(1) * freqs.unsqueeze(0)
+        emb = torch.cat([torch.cos(args), torch.sin(args)], dim=1)
+        if emb.shape[1] < self.dim:
+            emb = F.pad(emb, (0, self.dim - emb.shape[1]))
+        return emb  # (B, dim)
 
 def double_conv(inn, out):
     conv = nn.Sequential(
@@ -67,9 +86,35 @@ class LabelEmbedding(nn.Module):
 
 class UNET(nn.Module):
     # *UNET for 2 channel images (RGB)
-    def __init__(self, in_channels=3, out_channels=3, num_classes: int = 10):
-        assert in_channels == out_channels, "Input and output channels must be the same"
-        super(UNET, self).__init__()
+    def __init__(self, in_channels=3, out_channels=3, num_classes=10, embedding_dim=512, label_dropout=0.1):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_classes = num_classes
+        self.embedding_dim = embedding_dim
+        self.label_dropout = label_dropout
+
+        self.time_embed = SinusoidalTimeEmbedding(embedding_dim)
+        self.time_mlp = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.SiLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+        )
+
+        self.null_label_embedding = nn.Parameter(torch.zeros(embedding_dim))
+        self.label_embedding = nn.Embedding(num_classes, embedding_dim)
+        self.label_mlp = nn.Sequential(
+            nn.Linear(embedding_dim, embedding_dim),
+            nn.SiLU(),
+            nn.Linear(embedding_dim, embedding_dim),
+        )
+
+        # Projection for fused embedding -> bottleneck channels (512)
+        self.fuse_proj = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(embedding_dim, 512)
+        )
+
         # Downsampling
         self.max_pool_2x2 = nn.MaxPool2d(kernel_size=2, stride=2)
         self.down_conv1 = double_conv(in_channels, 32)
@@ -77,16 +122,8 @@ class UNET(nn.Module):
         self.down_conv3 = double_conv(64, 128)
         self.down_conv4 = double_conv(128, 256)
         self.down_conv5 = double_conv(256, 512)
-        #self.down_conv6 = double_conv(512, 1024)
 
-        # *Time embedding
-        self.time_mlp = TimeEmbedding(512)
-        # *Label embedding (optional conditioning)
-        self.label_mlp = LabelEmbedding(num_classes, 512)
-        
         # Upsampling
-        #self.up_trans1 = nn.ConvTranspose2d(1024, 512, kernel_size=2, stride=2)
-        #self.up_conv1 = double_conv(1024, 512)
         self.up_trans1 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
         self.up_conv1 = double_conv(512, 256)
         self.up_trans2 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
@@ -97,59 +134,71 @@ class UNET(nn.Module):
         self.up_conv4 = double_conv(64, 32)
         self.out = nn.Conv2d(32, out_channels, kernel_size=1)
     
-    @autocast(device_type='cuda')
-    def forward(self, x, t, labels=None):
-        # encode
-        x1 = self.down_conv1(x) # 32
+    def _forward_core(self, x, fused_embed):
+        # Encoder
+        x1 = self.down_conv1(x)
         x2 = self.max_pool_2x2(x1)
-        x3 = self.down_conv2(x2) # 64
+        x3 = self.down_conv2(x2)
         x4 = self.max_pool_2x2(x3)
-        x5 = self.down_conv3(x4) # 128
+        x5 = self.down_conv3(x4)
         x6 = self.max_pool_2x2(x5)
-        x7 = self.down_conv4(x6) # 256
+        x7 = self.down_conv4(x6)
         x8 = self.max_pool_2x2(x7)
-        x9 = self.down_conv5(x8) # 512
-
-        # *Add time embedding
-        t_emb = self.time_mlp(t)
-        t_emb = t_emb[:, :, None, None]  # Reshape for broadcasting
-        x9 = x9 + t_emb
-        # *Add label embedding if provided
-        if labels is not None:
-            # normalize labels input
-            if isinstance(labels, (list, tuple)):
-                labels = torch.tensor(labels, dtype=torch.long, device=t.device)
-            elif isinstance(labels, int):
-                labels = torch.tensor([labels], dtype=torch.long, device=t.device)
-            elif isinstance(labels, str):
-                raise TypeError("labels is a string; expected tensor/list/tuple of ints.")
-            elif isinstance(labels, torch.Tensor):
-                labels = labels.to(t.device).long()
-            else:
-                raise TypeError(f"Unsupported labels type: {type(labels)}")
-            l_emb = self.label_mlp(labels)
-            l_emb = l_emb[:, :, None, None]
-            x9 = x9 + l_emb
-
-        # decode
+        x9 = self.down_conv5(x8)
+        # Inject fused embedding
+        x9 = x9 + fused_embed[:, :, None, None]
+        # Decoder (skip order)
         x = self.up_trans1(x9)
-        y = crop_tensor(x7, x)
-        x = self.up_conv1(torch.cat([x, y], dim=1))
-
-        x = self.up_trans2(x7)
-        y = crop_tensor(x5, x)
-        x = self.up_conv2(torch.cat([x, y], dim=1))
-
-        x = self.up_trans3(x5)
-        y = crop_tensor(x3, x)
-        x = self.up_conv3(torch.cat([x, y], dim=1))
-
+        x = self.up_conv1(torch.cat([x, crop_tensor(x7, x)], 1))
+        x = self.up_trans2(x)
+        x = self.up_conv2(torch.cat([x, crop_tensor(x5, x)], 1))
+        x = self.up_trans3(x)
+        x = self.up_conv3(torch.cat([x, crop_tensor(x3, x)], 1))
         x = self.up_trans4(x)
-        y = crop_tensor(x1, x)
-        x = self.up_conv4(torch.cat([x, y], dim=1))
-
+        x = self.up_conv4(torch.cat([x, crop_tensor(x1, x)], 1))
         x = self.out(x)
         return x
+
+    @autocast(device_type='cuda')
+    def forward(self, x, timesteps, labels=None, guidance_scale=None):
+        # Time embedding
+        t_sin = self.time_embed(timesteps)
+        t_emb = self.time_mlp(t_sin)  # (B, D)
+
+        # Training-time label dropout (classifier-free)
+        if labels is not None and self.training:
+            keep = (torch.rand_like(labels.float()) > self.label_dropout)
+            effective_labels = labels.clone()
+            effective_labels[~keep] = -1
+        else:
+            effective_labels = labels
+
+        def label_encode(lab):
+            if lab is None:
+                return self.label_mlp(self.null_label_embedding.expand(x.size(0), -1))
+            if (lab == -1).all():
+                return self.label_mlp(self.null_label_embedding.expand(x.size(0), -1))
+            emb = self.label_embedding(torch.clamp(lab, min=0))
+            return self.label_mlp(emb)
+
+        # Conditional path
+        cond_label_emb = label_encode(effective_labels) if labels is not None else label_encode(None)
+        cond_fused = self.fuse_proj(t_emb + cond_label_emb)  # (B, 512)
+
+        # If no guidance scale, single forward
+        if guidance_scale is None or labels is None:
+            return self._forward_core(x, cond_fused)
+
+        # Unconditional path (all null labels, no dropout)
+        null_label_emb = label_encode(torch.full_like(labels, -1))
+        null_fused = self.fuse_proj(t_emb + null_label_emb)
+
+        # Two passes
+        x_cond = self._forward_core(x.clone(), cond_fused)
+        x_null = self._forward_core(x, null_fused)
+
+        # Classifier-free guidance combination
+        return x_null + guidance_scale * (x_cond - x_null)
 
 
 class BasicUNet(nn.Module):

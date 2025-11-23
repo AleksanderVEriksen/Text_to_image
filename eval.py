@@ -1,17 +1,22 @@
-import torch
-import torchvision
+import torch, torchvision, argparse, os, sys, numpy as np
 from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 import torch.nn as nn
-import numpy as np
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
 from data import get_dataset
-from utils import collate_fn, sample_images, tensor_grid_to_numpy, normalize_per_sample, load_model_weights, timesteps_to_str
+from utils import (
+    collate_fn, 
+    sample_images, 
+    tensor_grid_to_numpy, 
+    normalize_per_sample, 
+    load_model_weights, 
+    timesteps_to_str,  
+    set_global_seed
+)
 from ema import ExponentialMovingAverage
-import argparse
-import sys
-import os
+import json, os
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 autocast_device = "cuda" if device.type == "cuda" else "cpu"
@@ -27,6 +32,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
     parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
     parser.add_argument("--num_classes", type=int, default=10, help="Number of classes for label embedding")
+    parser.add_argument("--guidance_scale", type=float, default=None)
     return parser.parse_args()
 # ----------------------------------------------
 args = parse_args()
@@ -37,7 +43,20 @@ Checkpoint = args.checkpoint
 model_name = args.model_name
 num_classes = args.num_classes
 EMA = args.EMA
+img_size = 32 if Test else 64
+set_global_seed(42)
 
+
+def load_config_for_batch(batch_size):
+    path = f"models/{batch_size}/config.json"
+    if not os.path.isfile(path):
+        print(f"No config.json at {path}")
+        return {}
+    with open(path, "r") as f:
+        cfg = json.load(f)
+    return cfg
+
+# ----------------------------------------------
 if Checkpoint:
         if not args.model_name:
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
@@ -96,8 +115,30 @@ scaler = torch.amp.GradScaler(enabled=(device.type == "cuda"))
 ema = ExponentialMovingAverage(model, decay=0.9999)
 
 
+# After parsing args and before model init:
+cfg = load_config_for_batch(batch_size)
+if cfg:
+    # Optional assertions
+    if "num_classes" in cfg and cfg["num_classes"] != num_classes:
+        print(f"[warn] num_classes mismatch: config {cfg['num_classes']} vs arg {num_classes}")
+    if "embedding_dim" in cfg and hasattr(model, "embedding_dim") and model.embedding_dim != cfg["embedding_dim"]:
+        print(f"[warn] embedding_dim mismatch: config {cfg['embedding_dim']} vs model {model.embedding_dim}")
+    # Enforce img_size if present
+    img_size = cfg.get("img_size", img_size)
+    max_timesteps = cfg.get("max_timesteps", max_timesteps)
+
+# Use cfg-driven max_timesteps for scheduler if needed:
+# noise_scheduler = DDPMScheduler(num_train_timesteps=max_timesteps, ...)
+
 # Then use it (replace both loading blocks with):
-checkpoint = load_model_weights(model, model_name, device, Test, Checkpoint, EMA)
+checkpoint = load_model_weights(
+    model,
+    model_name=model_name,
+    batch_size=batch_size,
+    device=device,
+    use_checkpoint=Checkpoint,
+    use_ema=EMA
+)
 if checkpoint is not None:
     optimizer.load_state_dict(checkpoint.get("optimizer_state_dict", {}))
     ema.load_state_dict(checkpoint.get("ema_state", {}))
@@ -154,18 +195,18 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 # clamp for visualization in [0,1]
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
-ema.apply_shadow(model)            # swap in EMA weights
+#ema.apply_shadow(model)            # swap in EMA weights
 samples, timesteps_used = sample_images(
     model, 
     noise_scheduler, 
-    img_size=28, 
+    img_size=img_size, 
     device=device, 
     n=16, 
     Test=Test, 
-    debug=True, 
+    debug=False, 
     labels=torch.arange(10).repeat(2)[:16],
     num_classes=num_classes)
-ema.restore(model)                 # restore original weights after sampling
+#ema.restore(model)                 # restore original weights after sampling
 
 # ensure samples is on CPU
 samples = samples.cpu()
@@ -229,24 +270,23 @@ else:
     samples_vis = samples_vis.clamp(0.0, 1.0)
 
 
-# format timesteps safely (truncate if too long)
-ts_str = timesteps_to_str(timesteps_used)
 # Plot generated samples
 grid_arr = tensor_grid_to_numpy(samples_vis, nrow=min(8, samples_vis.shape[0]))
 plt.figure(figsize=(6, 6))
-plt.title(f"Generated Samples from Pure Noise\n(timesteps: {ts_str})", fontsize=8)
+plt.title(f"Generated Samples from Pure Noise, label=7", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
 plt.axis("off")
 plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
+
 # Single-step generation test (debug)
 with torch.no_grad():
     t = torch.tensor([max_timesteps - 1], device=device, dtype=torch.long)  # use last training timestep
     x = torch.randn((1, in_ch, 28, 28), device=device)
-    # Add label for conditioning (e.g., generate digit 5)
-    label = torch.tensor([5], device=device)  # Change number as needed
+    # Add label for conditioning (e.g., generate digit 7)
+    label = torch.tensor([7], device=device)  # Change number as needed
     eps = model(x, t, labels=label)
     # reuse alpha_cumprod from above
     alpha_t = alpha_cumprod[t].view(-1,1,1,1)
@@ -261,3 +301,38 @@ with torch.no_grad():
         x0v = x0v.clamp(0,1)
     print("single-step x0 stats:", float(x0v.min()), float(x0v.max()), float(x0v.mean()), float(x0v.std()))
     torchvision.utils.save_image(x0v, "figures/debug_single_step_x0.png", nrow=1)
+
+# Generate fully denoised samples for the chosen label (e.g. 7)
+samples_vis, timesteps_used = sample_images(
+    model,
+    noise_scheduler,
+    img_size=img_size,
+    device=device,
+    n=16,
+    Test=Test,
+    labels=7 if Test else None,
+    num_classes=10,
+    return_intermediates=False  # only final x0
+)
+
+# If guidance requested, run classifier-free guidance variant:
+guidance_scale = args.guidance_scale
+if guidance_scale is not None and Test:
+    with torch.no_grad():
+        # duplicate conditional/unconditional passes handled inside model.forward when guidance_scale provided
+        pass  # model already supports guidance when called with guidance_scale; adapt call if needed
+
+# Build grid and save with explicit “denoised” wording
+grid_arr = tensor_grid_to_numpy(samples_vis.cpu(), nrow=min(8, samples_vis.shape[0]))
+subset_ts = timesteps_used[timesteps_used <= 300]
+ts_str_subset = timesteps_to_str(subset_ts)
+
+plt.figure(figsize=(6, 3))
+plt.title(f"Denoised Samples (x0) for label=7\n(timesteps ≤300 listed: {ts_str_subset})", fontsize=8)
+plt.imshow(grid_arr, cmap='gray' if samples_vis.shape[1] == 1 else None)
+plt.axis('off')
+os.makedirs("figures", exist_ok=True)
+plt.savefig(f"figures/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
+plt.close()
+
+

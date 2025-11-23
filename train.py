@@ -1,5 +1,4 @@
 from diffusers import DDPMScheduler
-from utils import collate_fn, sample_images, validate, plot_losses, save_with_retry
 from training import train_epoch
 import warnings
 # -----------------------------------------------
@@ -22,6 +21,18 @@ from torch.amp import GradScaler
 import argparse
 from data import get_dataset, get_mnist_dataset
 from ema import ExponentialMovingAverage
+from utils import (
+    set_global_seed,
+    save_config,
+    plot_fid,
+    collate_fn,
+    save_with_retry,
+    sample_images,
+    validate,
+    plot_losses,
+    # Newly used / available helpers
+    weighted_noise_loss,  # (optional if integrating later)
+)
 # Clear cache
 gc.collect()
 torch.cuda.empty_cache()
@@ -41,22 +52,23 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_s
 # *Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Train UNET on MNIST or custom dataset")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs")
-    parser.add_argument("--max_timesteps", type=int, default=1000, help="Number of timesteps")
-    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "custom"], help="Dataset to use: mnist or custom")
-    parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
-    parser.add_argument("--num_classes", type=int, default=10, help="Number of label classes for label embedding")
-    parser.add_argument("--checkpoint", action="store_true", help="Use a checkpoint to resume training")
-    parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
-    parser.add_argument("--val_every", type=int, default=3, help="Run validation every N epochs")
-    parser.add_argument("--val_max_batches", type=int, default=8, help="Max validation batches (None for all)")
-    parser.add_argument("--sample_every_epoch", type=int, default=50, help="Run sampling every N epochs")
-    parser.add_argument("--save_every_epoch", type=int, default=10, help="Run saving every N epochs")
-    parser.add_argument("--augment", action="store_true", default=False, help="Use data augmentation during training")
-    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience epochs")
-    parser.add_argument("--top_k_models", type=int, default=3, help="Number of top models to save based on validation loss")
-    parser.add_argument("--fid_epoch_calc", type=int, default=9, help="Calculate FID every N epochs")
+    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--max_timesteps", type=int, default=1000)
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "custom"])
+    parser.add_argument("--model", type=str, default="UNET", choices=['UNET', 'Basic'])
+    parser.add_argument("--num_classes", type=int, default=10)
+    parser.add_argument("--checkpoint", action="store_true")
+    parser.add_argument("--model_name", type=str, default="model")
+    parser.add_argument("--val_every", type=int, default=5)
+    parser.add_argument("--val_max_batches", type=int, default=32)
+    parser.add_argument("--sample_every_epoch", type=int, default=50)
+    parser.add_argument("--save_every_epoch", type=int, default=10)
+    parser.add_argument("--augment", action="store_true", default=False)
+    parser.add_argument("--patience", type=int, default=5)
+    parser.add_argument("--top_k_models", type=int, default=3)
+    parser.add_argument("--fid_epoch_calc", type=int, default=50)
+    parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     return parser.parse_args()
 # ----------------------------------------------
 if __name__ == "__main__":
@@ -76,7 +88,8 @@ if __name__ == "__main__":
     patience_counter = 0
     best_loss = float('inf')
     best_val_loss = float('inf')
-    img_size = 28 if Dataset == "mnist" else 64
+    best_fid = float('inf')  # Initialize best FID for early stopping
+    img_size = 32 if Dataset == "mnist" else 64
     num_channels = 1 if Dataset == "mnist" else 3
     top_models = []
 
@@ -197,16 +210,16 @@ if __name__ == "__main__":
 
         preview_save_path = f"figures/preview/sample_images_grid_{Dataset}.png"
         os.makedirs("figures/preview", exist_ok=True)
-        save_with_retry(torchvision.utils.save_image,
-            preview_images,
-            preview_save_path,
-            nrow=num_preview//2,
-            normalize=True)
-        print(f"Saved preview grid of {num_preview} images to {preview_save_path}\n")
-    else:
-        print("Sample is not a tuple or list; skipping preview image saving.\n" \
-        "" \
-        "")
+        try:
+            torchvision.utils.save_image(
+                preview_images,
+                preview_save_path,
+                nrow=num_preview // 2,
+                normalize=True
+            )
+            print(f"Saved preview grid of {num_preview} images to {preview_save_path}\n")
+        except Exception as e:
+            print(f"Failed to save preview grid: {e}")
     # ----------------------------------------------
 
     # *Configurate the noise scheduler
@@ -230,53 +243,78 @@ if __name__ == "__main__":
     # *Training loop
     torch.autograd.set_detect_anomaly(False)   # enable True only when debugging
     global_step = 0
+
+    # Tracking lists for plotting (epochs separate from losses)
+    train_epochs = []
+    val_epoch_points = []
+    # Already existing lists:
     val_losses = []
     train_losses = []
     running_avg_losses = []
     fid_scores = []
+    fid_epochs = []
+
+    # Set global seed
+    set_global_seed(args.seed if hasattr(args, "seed") else 42)
+
+    # After scheduler init, cache alphas_cumprod for SNR weighting
+    alphas_cumprod = noise_scheduler.alphas_cumprod.to(device)
+
+    # Save config once (removed non-existent args.model_type / args.ema_decay)
+    save_config({
+        "version": 1,
+        "batch_size": args.batch_size,
+        "model": args.model,
+        "embedding_dim": 512,
+        "num_classes": args.num_classes,
+        "max_timesteps": args.max_timesteps,
+    }, f"models/{args.batch_size}/config.json")
+
+    train_epoch_losses = []  # per-epoch losses (for plotting)
 
     for epoch in range(start_epoch, num_epochs):
         current_epoch += 1
+
+        # train_epoch should already average over dataloader; if not, divide by len(train_dataloader)
         epoch_loss = train_epoch(
-        model, train_dataloader, optimizer, noise_scheduler,
-        loss_fn, device, scaler, epoch, num_epochs, scheduler_lr  # Pass scheduler
-    )
-    
+            model, train_dataloader, noise_scheduler, optimizer,
+            loss_fn, device, ema=ema, mixed_precision=True
+        )
+
         # * Validation step
         if (epoch + 1) % args.val_every == 0:
             val_results = validate(
-                                model,
-                                current_epoch,
-                                val_dataloader, 
-                                noise_scheduler, 
-                                loss_fn, 
-                                device,
-                                max_batches=args.val_max_batches,
-                                calculate_fid_score=True,
-                                fid_epoch_calc=FID_EPOCH_CALC,
-                                img_size=img_size
-                                )
-            
+                model,
+                current_epoch,
+                val_dataloader,
+                noise_scheduler,
+                loss_fn,
+                device,
+                max_batches=args.val_max_batches,
+                calculate_fid_score=True,
+                fid_epoch_calc=FID_EPOCH_CALC,
+                img_size=img_size
+            )
             val_loss = val_results['val_loss']
             running_avg_loss = val_results['running_avg_loss']
             fid_score = val_results.get('fid_score', None)
-# ------------------------------------------------------------
-            # Store metrics
+
             val_losses.append(val_loss)
             running_avg_losses.append(running_avg_loss)
+            val_epoch_points.append(current_epoch)
+
             if fid_score is not None:
                 fid_scores.append(fid_score)
-# ------------------------------------------------------------
-            # *Early Stopping check
-            if running_avg_loss < best_val_loss:
-                best_val_loss = running_avg_loss
-                patience_counter = 0
-            else:
-                patience_counter += 1
+                fid_epochs.append(current_epoch)
+                if fid_score < best_fid:
+                    best_fid = fid_score
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                if patience_counter > args.patience:
+                    print(f"Early stopping triggered at epoch {current_epoch} due to FID not improving")
+                    break
 
-            if patience_counter > args.patience:
-                print(f"Early stopping triggered at epoch {epoch+1}")
-                break
 # ------------------------------------------------------------
         # Keep expensive image sampling less frequent
         if (epoch + 1) % args.sample_every_epoch == 0 or (epoch == 0):
@@ -287,7 +325,7 @@ if __name__ == "__main__":
                 test_labels = torch.full((n_images,), 7, device=device)  # Test multiple 7s
                 # Get batch for FID calculation
                 real_batch = next(iter(val_dataloader))[0][:n_images].to(device)
-                ema.apply_shadow(model)
+                #ema.apply_shadow(model)
                 generated_images = sample_images(
                     model, 
                     noise_scheduler, 
@@ -297,7 +335,7 @@ if __name__ == "__main__":
                     Test=True, 
                     labels=test_labels,
                     num_classes=num_classes)
-                ema.restore(model)
+                #ema.restore(model)
                 # sample_images may return (samples, intermediates) or a tensor/ndarray
                 if isinstance(generated_images, (list, tuple)):
                     generated_images = generated_images[0].cpu()
@@ -305,71 +343,76 @@ if __name__ == "__main__":
                     generated_images = generated_images.cpu()
             # save grid
             sample_save_path = f"figures/samples/digit_7_epoch_{epoch+1 if epoch > 0 else 0}.png"
-            save_with_retry(torchvision.utils.save_image,
-                generated_images,
-                sample_save_path,
-                nrow=n_images//4,
-                normalize=True)
+            try:
+                torchvision.utils.save_image(
+                    generated_images,
+                    sample_save_path,
+                    nrow=n_images // 4,
+                    normalize=True
+                )
+            except Exception as e:
+                print(f"Failed to save generated samples grid: {e}")
 # -------------------------------------------------------------
         # * ------------------ Compute and log metrics ------------------ *
-
-        # Log average loss
-        avg_epoch_loss = epoch_loss / len(train_dataloader)
         
-        # After dataset creation, add lists to store metrics
-        train_losses.append(avg_epoch_loss)
+        avg_epoch_loss = float(epoch_loss)
+        train_epoch_losses.append(avg_epoch_loss)
+        train_epochs.append(current_epoch)
 
         # Print metrics
         print(f"\nEpoch {epoch+1}/{num_epochs}")
         print(f"Training loss: {avg_epoch_loss:.4f}")
-        if (epoch + 1) % args.val_every == 0: 
+        if (epoch + 1) % args.val_every == 0:
             print(f"Validation loss: {val_loss:.4f}")
             print(f"Running avg val loss: {running_avg_loss:.4f}")
             print(f"Best validation loss: {min(val_losses):.4f}")
             if fid_score is not None and current_epoch % FID_EPOCH_CALC == 0:
                 print(f"FID score: {fid_score:.4f}")
-            print(f"Patience counter: {patience_counter}/{args.patience}")
+                print(f"Best FID: {best_fid:.4f}")
+                print(f"Patience counter: {patience_counter}/{args.patience}")
         print("-" * 50)
         
         # * ------------------ Save model checkpoints ------------------ *
         if (epoch + 1) % args.val_every == 0: 
             if running_avg_loss == min(running_avg_losses):
-                print(f"Running average validation loss improved. Saving checkpoint...")
+                print("Running average validation loss improved. Saving checkpoint...")
                 best_model_path = f"{save_dir}/best_model.pth"
                 best_loss = running_avg_loss
                 save_with_retry(
-                torch.save,{
-                    'epoch': epoch + 1,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler_lr.state_dict(),
-                    'scaler_state_dict': scaler.state_dict(),
-                    'val_loss': val_loss,
-                    'running_avg_loss': running_avg_loss,
-                    'val_losses': val_losses,
-                    'running_avg_losses': running_avg_losses,
-                    'ema_state': ema.state_dict(),
-                    'batch_size': batch_size,
-                }, 
-                f"{best_model_path}"
+                    best_model_path,
+                    {
+                        'epoch': epoch + 1,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'scheduler_state_dict': scheduler_lr.state_dict(),
+                        'scaler_state_dict': scaler.state_dict(),
+                        'val_loss': val_loss,
+                        'running_avg_loss': running_avg_loss,
+                        'val_losses': val_losses,
+                        'running_avg_losses': running_avg_losses,
+                        'ema_state': ema.state_dict(),
+                        'batch_size': batch_size,
+                    }
                 )
 
         # *Save model checkpoint every N epochs
         if (epoch + 1) % args.save_every_epoch == 0:
             ckpt_path = os.path.join(check_save_dir, f"model{'_test' if Dataset == 'mnist' else ''}_{current_epoch}.pth")
-            torch.save({
-                "epoch": epoch + 1,
-                "model_state_dict": model.state_dict(),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
-                "ema_state": ema.state_dict(),
-                "loss": running_avg_loss,
-            }, ckpt_path)
-            # *Manage top k checkpoint models
+            save_with_retry(
+                ckpt_path,
+                {
+                    "epoch": epoch + 1,
+                    "model_state_dict": model.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scaler_state_dict": scaler.state_dict() if device.type == "cuda" else {},
+                    "ema_state": ema.state_dict(),
+                    "loss": running_avg_loss,
+                    "version": 1,
+                }
+            )
             top_models.append((running_avg_loss, ckpt_path))
-            top_models.sort(key=lambda x: x[0])  # Sort by loss
+            top_models.sort(key=lambda x: x[0])
             if len(top_models) > args.top_k_models:
-                # Remove worst model
                 _, worst_model_path = top_models.pop()
                 if os.path.exists(worst_model_path):
                     os.remove(worst_model_path)
@@ -380,12 +423,24 @@ if __name__ == "__main__":
     # Also save a separate file with EMA weights applied to the model (for easy inference)
     ema_save_path = f"{save_dir}/{model_name}_EMA{'_test' if Dataset == 'mnist' else ''}.pth"
     ema.apply_shadow(model)
-    save_with_retry(torch.save, {
-        "model_state_dict": model.state_dict(),
-        "batch_size": batch_size
-    }, ema_save_path)
+    # save checkpoint with ema.state_dict()
+    save_with_retry(
+        ema_save_path,
+        {
+            "model_state_dict": model.state_dict(),
+            "batch_size": batch_size
+        }
+    )
     ema.restore(model)
     print(f"EMA model saved as {ema_save_path}")
 
-    # After the training loop
-    plot_losses(train_losses, val_losses, args.val_every, save_path="figures/loss_curves/loss_plot.png")
+    # Correct plot_losses call with epoch lists
+    plot_losses(
+        train_epochs,
+        train_epoch_losses,
+        val_epoch_points,
+        val_losses,
+        running_avg_losses,
+        save_path="figures/loss_curves/loss_plot.png"
+    )
+    plot_fid(fid_scores, fid_epochs, save_path="figures/fid_plot.png")
