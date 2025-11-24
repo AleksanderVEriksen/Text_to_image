@@ -6,6 +6,10 @@ This project trains a diffusion (DDPM) UNet to denoise images conditioned on cla
 
 Images (custom WebDataset or MNIST) plus optional textual/label conditioning. MNIST is internally resized to 32×32; custom data can be 64×64.
 
+## Model architecture
+
+|![Architecture of the UNET](model_diagram_Mermaid.png "Mermaid image of model architecture")|
+
 ## PyTorch with CUDA
 
 Training uses PyTorch, mixed precision (AMP), optional EMA weights, and a DDPM noise scheduler.
@@ -219,31 +223,26 @@ python generate_from_text.py --label 7 --model UNET --model_name best_model --ba
 |*Evaluation of trained UNET on MNIST dataset - 10 timesteps*|
 |:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-4.png "Eval on model trained on MNIST")|
-|:--:|
 
 |*Evaluation of trained UNET on MNIST dataset - 1000 timesteps*|
 |:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-5.png "Eval on model trained on MNIST")|
-|:--:|
 
 ### Test with attached labels
 
 |*Evaluation of trained UNET on MNIST dataset - 1000 timesteps*|
 |:--:|
 |![Evaluation of trained UNET on MNIST dataset](image-6.png "Eval on model trained on MNIST")|
-|:--:|
 
 |*Generated images of 7 from text*|
 |:--:|
 |![Generated images of 7 from text prompt](image-7.png "Reconstructed images of 7")|
-|:--:|
 
 ## Tests with added projections - 20 epochs
 
 |* Test with added projections, and forced 32x32 image|
 |:--:|
 |![Generated images of 7 from text prompt](image-8.png "Reconstructed images of 7")|
-|:--:|
 
 |![Eval](image-9.png "Eval")|
 |:--:|
