@@ -13,7 +13,7 @@ def parse_args():
     p.add_argument('--label', type=str, required=True, help='Text label to condition on (e.g. "7" or "seven")')
     p.add_argument('--num_samples', type=int, default=16)
     p.add_argument('--num_classes', type=int, default=10)
-    p.add_argument('--img_size', type=int, default=28)
+    p.add_argument('--img_size', type=int, default=32)
     p.add_argument('--timesteps', type=int, default=1000)
     p.add_argument('--out', type=str, default='generated.png')
     p.add_argument('--batch_size', type=int, default=32, help='Batch size used during training (for loading correct model weights)')
@@ -104,21 +104,21 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    in_ch = 1 if img_size <= 28 else 3
-    out_ch = in_ch
-    print(f"Using model type: {args.model} with in/out channels: {in_ch}/{out_ch}")
-    model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device) if args.model == 'Basic' else \
-            UNET(in_channels=in_ch, out_channels=out_ch, num_classes=args.num_classes).to(device)
-
-    # Load model weights using the helper function
-    load_model(model, args.batch_size, args.model_name, device)
-
     cfg = load_config(args.batch_size)
     if cfg:
         if "num_classes" in cfg and cfg["num_classes"] != args.num_classes:
             print(f"[warn] num_classes mismatch config={cfg['num_classes']} arg={args.num_classes}")
         img_size = cfg.get("img_size", args.img_size)
         max_timesteps = cfg.get("max_timesteps", args.timesteps)
+
+
+    in_ch = 1 if img_size <= 32 else 3
+    print(f"Using model type: {args.model} with in/out channels: {in_ch}")
+    model = BasicUNet(in_channels=in_ch, num_classes=args.num_classes).to(device) if args.model == 'Basic' else \
+            UNET(in_channels=in_ch, num_classes=args.num_classes).to(device)
+
+    # Load model weights using the helper function
+    load_model(model, args.batch_size, args.model_name, device)
 
     noise_scheduler = DDPMScheduler(
     num_train_timesteps=max_timesteps,

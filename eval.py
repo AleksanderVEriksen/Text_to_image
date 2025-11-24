@@ -98,10 +98,9 @@ else:
 
 # Create the UNET model
 in_ch = 1 if Test else 3
-out_ch = 1 if Test else 3
 
-model = BasicUNet(in_channels=in_ch, out_channels=out_ch, num_classes=num_classes).to(device) if args.model == "Basic" \
-    else UNET(in_channels=in_ch, out_channels=out_ch, num_classes=num_classes).to(device)
+model = BasicUNet(in_channels=in_ch, num_classes=num_classes).to(device) if args.model == "Basic" \
+    else UNET(in_channels=in_ch, num_classes=num_classes).to(device)
 
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 loss_fn = nn.MSELoss() # L2 loss for noise prediction
