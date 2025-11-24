@@ -61,12 +61,12 @@ def parse_args():
     parser.add_argument("--model_name", type=str, default="model")
     parser.add_argument("--val_every", type=int, default=5)
     parser.add_argument("--val_max_batches", type=int, default=32)
-    parser.add_argument("--sample_every_epoch", type=int, default=20)
+    parser.add_argument("--sample_every_epoch", type=int, default=50)
     parser.add_argument("--save_every_epoch", type=int, default=10)
     parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--top_k_models", type=int, default=3)
-    parser.add_argument("--fid_epoch_calc", type=int, default=50)
+    parser.add_argument("--fid_epoch_calc", type=int, default=20)
     parser.add_argument("--use_weighted_snr", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     return parser.parse_args()
@@ -323,6 +323,26 @@ if __name__ == "__main__":
                 if fid_score < best_fid:
                     best_fid = fid_score
                     patience_counter = 0
+                    # Saves best FID model
+                    best_fid_path = f"{save_dir}/best_fid_model.pth"
+                    save_with_retry(
+                        best_fid_path,
+                        {
+                            'epoch': epoch + 1,
+                            'fid_score': fid_score,
+                            'best_fid': best_fid,
+                            'val_loss': val_loss,
+                            'running_avg_loss': running_avg_loss,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler_lr.state_dict(),
+                            'scaler_state_dict': scaler.state_dict(),
+                            'ema_state': ema.state_dict(),
+                            'batch_size': batch_size,
+                            'version': 1
+                        }
+                    )
+                    
                 else:
                     patience_counter += 1
                 if patience_counter > args.patience:
@@ -332,7 +352,6 @@ if __name__ == "__main__":
 # ------------------------------------------------------------
         # Keep expensive image sampling less frequent
         if (epoch + 1) % args.sample_every_epoch == 0 or (epoch == 0):
-            print(epoch+1, args.sample_every_epoch)
             with torch.no_grad():
                 model.eval()
                 # Test reconstruction of specific digits
@@ -432,7 +451,7 @@ if __name__ == "__main__":
                     os.remove(worst_model_path)
 
     print(f"\nBest model saved with loss {best_loss:.4f}")
-
+    print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
     # Sampling block (unconditional preview first):
     uncond_preview, _ = sample_images(
     model, noise_scheduler, img_size, device,

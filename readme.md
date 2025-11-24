@@ -245,11 +245,24 @@ python generate_from_text.py --label 7 --model UNET --model_name best_model --ba
 |![Generated images of 7 from text prompt](image-8.png "Reconstructed images of 7")|
 |:--:|
 
-|![Evals](image-9.png "Eval")|
+|![Eval](image-9.png "Eval")|
 |:--:|
 
 |![Generated samples denoised](image-10.png)|
 |:--:|
 
 |![Generated samples](image-11.png)|
+|:--:|
+
+## Tests with added projections - 300 epochs
+
+|* Test with added projections, and forced 32x32 image|
+|:--:|
+|![Generated images of 7 from text prompt](image-12.png "Reconstructed images of 7")|
+|:--:|
+
+|![Eval](image-14.png "Eval")|
+|:--:|
+
+|![Generated samples denoised](image-13.png)|
 |:--:|

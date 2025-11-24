@@ -240,7 +240,7 @@ axs[3].axis('off')
 
 plt.subplots_adjust(hspace=0.35)
 os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
-plt.savefig(f"figures/eval/{batch_size}/eval_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+plt.savefig(f"figures/eval/{batch_size}/eval_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -268,7 +268,7 @@ plt.figure(figsize=(6, 6))
 plt.title(f"Generated Samples from Pure Noise, label=7", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
 plt.axis("off")
-plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -324,7 +324,7 @@ plt.title(f"Denoised Samples (x0) for label=7\n(timesteps ≤300 listed: {ts_str
 plt.imshow(grid_arr, cmap='gray' if samples_vis.shape[1] == 1 else None)
 plt.axis('off')
 os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
-plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{batch_size}_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
+plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
 plt.close()
 
 
