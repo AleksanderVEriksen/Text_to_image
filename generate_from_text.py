@@ -2,9 +2,10 @@ import argparse
 import torch
 import torchvision
 from diffusers import DDPMScheduler
+import ema
 from model import UNET, BasicUNet
 from utils import sample_images
-
+from ema import ExponentialMovingAverage
 
 def parse_args():
     p = argparse.ArgumentParser()
@@ -116,7 +117,7 @@ def main():
     print(f"Using model type: {args.model} with in/out channels: {in_ch}")
     model = BasicUNet(in_channels=in_ch, num_classes=args.num_classes).to(device) if args.model == 'Basic' else \
             UNET(in_channels=in_ch, num_classes=args.num_classes).to(device)
-
+    ema = ExponentialMovingAverage(model, decay=0.9999)
     # Load model weights using the helper function
     load_model(model, args.batch_size, args.model_name, device)
 
@@ -134,6 +135,7 @@ def main():
     model.eval()
     with torch.no_grad():
         labels = parse_label_string(args.label, num_classes, args.num_samples, device)
+        ema.apply_shadow(model)
         samples, timesteps_tensor = sample_images(model, 
                                                 noise_scheduler, 
                                                 img_size= img_size, 
@@ -143,7 +145,7 @@ def main():
                                                 num_classes=num_classes,
                                                 guidance_scale=args.guidance_scale
                                                 )
-
+        ema.restore(model)
     if isinstance(samples, torch.Tensor):
         samples = samples.cpu()
     else:

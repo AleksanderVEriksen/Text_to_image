@@ -323,7 +323,9 @@ if __name__ == "__main__":
                 if fid_score < best_fid:
                     best_fid = fid_score
                     patience_counter = 0
-                    # Saves best FID model
+                    # apply EMA weights for saving best FID
+                    if ema is not None:
+                        ema.apply_shadow(model)
                     best_fid_path = f"{save_dir}/best_fid_model.pth"
                     save_with_retry(
                         best_fid_path,
@@ -337,16 +339,19 @@ if __name__ == "__main__":
                             'optimizer_state_dict': optimizer.state_dict(),
                             'scheduler_state_dict': scheduler_lr.state_dict(),
                             'scaler_state_dict': scaler.state_dict(),
-                            'ema_state': ema.state_dict(),
+                            'ema_state': ema.state_dict() if ema is not None else None,
                             'batch_size': batch_size,
                             'version': 1
                         }
                     )
-                    
+                    if ema is not None:
+                        # optional: restore original weights after save
+                        pass
+                    print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
                 else:
                     patience_counter += 1
                 if patience_counter > args.patience:
-                    print(f"Early stopping triggered at epoch {current_epoch} due to FID not improving")
+                    print(f"Early stopping (FID patience {args.patience}) at epoch {current_epoch}")
                     break
 
 # ------------------------------------------------------------
@@ -357,7 +362,7 @@ if __name__ == "__main__":
                 # Test reconstruction of specific digits
                 n_images = 16
                 test_labels = torch.full((n_images,), 7, device=device)  # Test multiple 7s
-                #ema.apply_shadow(model)
+                ema.apply_shadow(model)
                 generated_images = sample_images(
                     model, 
                     noise_scheduler, 
@@ -367,7 +372,7 @@ if __name__ == "__main__":
                     Test=True, 
                     labels=test_labels,
                     num_classes=num_classes)
-                #ema.restore(model)
+                ema.restore(model)
                 # sample_images may return (samples, intermediates) or a tensor/ndarray
                 if isinstance(generated_images, (list, tuple)):
                     generated_images = generated_images[0].cpu()

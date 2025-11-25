@@ -44,8 +44,11 @@ def get_mnist_dataset(train:bool=True, augment:bool=False):
     if augment:
         transform_list = [transforms.ToTensor()]
         transform_list = [
+            transforms.Resize((32, 32)),
             transforms.RandomRotation(10),
             transforms.RandomAffine(0, translate=(0.1, 0.1)),
+            transforms.ToTensor(),
+            transforms.Lambda(lambda x: 2 * x - 1)
         ] + transform_list
         aug_transform = transforms.Compose(transform_list)
         dataset = MNIST(root='./data', train=train, download=True, transform=aug_transform)

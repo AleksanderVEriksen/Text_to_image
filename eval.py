@@ -187,7 +187,7 @@ x0_pred = (noised_x - sqrt_one_minus_alpha_cumprod_t * pred) / (sqrt_alpha_cumpr
 # clamp for visualization in [0,1]
 denoised_vis = x0_pred.clamp(0.0, 1.0).cpu()
 # generate samples from pure noise (utils.sample_images may return (samples, intermediates))
-#ema.apply_shadow(model)            # swap in EMA weights
+ema.apply_shadow(model)            # swap in EMA weights
 samples, timesteps_used = sample_images(
     model, 
     noise_scheduler, 
@@ -198,7 +198,7 @@ samples, timesteps_used = sample_images(
     debug=False, 
     labels=torch.arange(10).repeat(2)[:16],
     num_classes=num_classes)
-#ema.restore(model)                 # restore original weights after sampling
+ema.restore(model)                 # restore original weights after sampling
 
 # ensure samples is on CPU
 samples = samples.cpu()

@@ -8,7 +8,7 @@ Images (custom WebDataset or MNIST) plus optional textual/label conditioning. MN
 
 ## Model architecture
 
-|![Architecture of the UNET](model_diagram_Mermaid.png "Mermaid image of model architecture")|
+![Architecture of the UNET](model_diagram_Mermaid.png "Mermaid image of model architecture")
 
 ## PyTorch with CUDA
 
