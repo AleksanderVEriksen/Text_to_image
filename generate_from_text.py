@@ -10,6 +10,7 @@ from ema import ExponentialMovingAverage
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--model_name', type=str, default='model', help='Saved model filename (in ./models/)')
+    p.add_argument('--dataset', type=str, default='mnist', choices=['mnist', 'custom'])
     p.add_argument('--model', type=str, default='UNET', choices=['UNET', 'Basic'])
     p.add_argument('--label', type=str, required=True, help='Text label to condition on (e.g. "7" or "seven")')
     p.add_argument('--num_samples', type=int, default=16)
@@ -62,8 +63,8 @@ def parse_label_string(label_str, num_classes, num_samples, device):
 def load_model(model, batch_size, model_name, device):
     """Helper function to load model weights with proper error handling"""
     possible_paths = [
-        f"models/{batch_size}/{model_name}.pth",
-        f"models/checkpoints/{batch_size}/{model_name}.pth",
+        f"models/{dataset}/{batch_size}/{model_name}.pth",
+        f"models/{dataset}/checkpoints/{batch_size}/{model_name}.pth",
     ]
     
     for path in possible_paths:
@@ -92,8 +93,8 @@ def load_model(model, batch_size, model_name, device):
     return False
 
 import json, os
-def load_config(batch_size):
-    path = f"models/{batch_size}/config.json"
+def load_config(dataset, batch_size):
+    path = f"models/{dataset}/{batch_size}/config.json"
     return json.load(open(path)) if os.path.isfile(path) else {}
 
 def main():

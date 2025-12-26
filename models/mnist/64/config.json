@@ -1,6 +1,7 @@
 {
   "version": 1,
-  "batch_size": 32,
+  "dataset": "mnist",
+  "batch_size": 64,
   "model": "UNET",
   "embedding_dim": 512,
   "num_classes": 10,

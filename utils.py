@@ -539,3 +539,26 @@ def sample_to_tensor(sample):
         return transform(sample['jpg'])
     else:
         return transform(sample[0])
+    
+
+# =========================================================
+from typing import Union, List, cast
+from mlflow.types import ColSpec, TensorSpec
+from mlflow.models import ModelSignature
+from mlflow.types import Schema
+
+def build_signature(num_channels: int, img_size: int, num_classes: int) -> ModelSignature:
+    input_specs: List[Union[TensorSpec, ColSpec]] = [
+        TensorSpec(np.dtype(np.float32), (-1, num_channels, img_size, img_size), name="x"),
+        TensorSpec(np.dtype(np.int64),   (-1,), name="timesteps"),
+    ]
+    if num_classes:
+        input_specs.append(TensorSpec(np.dtype(np.int64), (-1,), name="labels"))
+    output_specs: List[Union[TensorSpec, ColSpec]] = [
+        TensorSpec(np.dtype(np.float32), (-1, num_channels, img_size, img_size), name="pred_noise"),
+    ]
+    # Cast to satisfy Schema’s expected parameter type
+    return ModelSignature(
+        inputs=Schema(cast(List[Union[TensorSpec, ColSpec]], input_specs)),
+        outputs=Schema(cast(List[Union[TensorSpec, ColSpec]], output_specs)),
+    )

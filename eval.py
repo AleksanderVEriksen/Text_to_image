@@ -25,8 +25,8 @@ autocast_device = "cuda" if device.type == "cuda" else "cpu"
 def parse_args():
     parser = argparse.ArgumentParser(description="Train UNet on MNIST or custom dataset")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
+    parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "custom"], help="Dataset name")
     parser.add_argument("--max_timesteps", type=int, default=1000, help="Number of timesteps")
-    parser.add_argument("--test", action="store_true", help="Use MNIST test dataset")
     parser.add_argument("--checkpoint", action="store_true", help="Use a checkpoint model to eval")
     parser.add_argument("--EMA", action="store_true", help="Use EMA weights for evaluation")
     parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
@@ -38,16 +38,16 @@ def parse_args():
 args = parse_args()
 batch_size = args.batch_size
 max_timesteps = args.max_timesteps
-Test = args.test
+Dataset = args.dataset
 Checkpoint = args.checkpoint
 model_name = args.model_name
 num_classes = args.num_classes
 EMA = args.EMA
-img_size = 32 if Test else 64
+img_size = 32 if Dataset == "mnist" else 64
 set_global_seed(42)
 
 def load_config(batch_size):
-    path = f"models/{batch_size}/config.json"
+    path = f"models/{args.dataset}/{batch_size}/config.json"
     return json.load(open(path)) if os.path.isfile(path) else {}
 
 # ----------------------------------------------
@@ -56,7 +56,7 @@ if Checkpoint:
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
             sys.exit(1)
 
-        ckpt_path = f"models/checkpoints/{batch_size}/{args.model_name}.pth"
+        ckpt_path = f"models/{args.dataset}/checkpoints/{batch_size}/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: Checkpoint file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
@@ -66,21 +66,21 @@ if EMA:
             print("Warning: --EMA set but no --model_name provided. Exiting.")
             sys.exit(1)
 
-        ckpt_path = f"models/{batch_size}/{args.model_name}.pth"
+        ckpt_path = f"models/{args.dataset}/{batch_size}/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: EMA file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
         model_name = args.model_name
 
 # Load dataset from data.py
-if Test == False:
+if Dataset == "mnist":
     train, val, test = get_dataset()
 
     train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
     val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn, shuffle=True)
     test_dataloader = DataLoader(test, batch_size, collate_fn=collate_fn, shuffle=False)
 
-else:
+elif Dataset == "custom":
     # Load example dataset for testing
     mnist_train = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
     mnist_test = torchvision.datasets.MNIST(root="mnist/", train=False, download=True)
@@ -97,7 +97,7 @@ else:
 
 
 # Create the UNET model
-in_ch = 1 if Test else 3
+in_ch = 1 if Dataset == "mnist" else 3
 
 model = BasicUNet(in_channels=in_ch, num_classes=num_classes).to(device) if args.model == "Basic" \
     else UNET(in_channels=in_ch, num_classes=num_classes).to(device)
@@ -239,8 +239,8 @@ axs[3].imshow(tensor_grid_to_numpy(denoised_vis, nrow=min(8, denoised_vis.shape[
 axs[3].axis('off')
 
 plt.subplots_adjust(hspace=0.35)
-os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
-plt.savefig(f"figures/eval/{batch_size}/eval_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+os.makedirs(f"figures/{Dataset}/eval/{batch_size}", exist_ok=True)
+plt.savefig(f"figures/{Dataset}/eval/{batch_size}/eval.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -268,7 +268,7 @@ plt.figure(figsize=(6, 6))
 plt.title(f"Generated Samples from Pure Noise, label=7", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if in_ch == 1 else None)
 plt.axis("off")
-plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{'MNIST' if Test else 'custom'}.png", bbox_inches="tight")
+plt.savefig(f"figures/{Dataset}/eval/{batch_size}/eval_generate_sample.png", bbox_inches="tight")
 plt.show()
 plt.close()
 
@@ -292,7 +292,7 @@ with torch.no_grad():
     else:
         x0v = x0v.clamp(0,1)
     print("single-step x0 stats:", float(x0v.min()), float(x0v.max()), float(x0v.mean()), float(x0v.std()))
-    torchvision.utils.save_image(x0v, "figures/debug_single_step_x0.png", nrow=1)
+    torchvision.utils.save_image(x0v, f"figures/{Dataset}/debug_single_step_x0.png", nrow=1)
 
 # Generate fully denoised samples for the chosen label (e.g. 7)
 samples_vis, timesteps_used = sample_images(
@@ -323,8 +323,8 @@ plt.figure(figsize=(6, 3))
 plt.title(f"Denoised Samples (x0) for label=7\n(timesteps ≤300 listed: {ts_str_subset})", fontsize=8)
 plt.imshow(grid_arr, cmap='gray' if samples_vis.shape[1] == 1 else None)
 plt.axis('off')
-os.makedirs(f"figures/eval/{batch_size}", exist_ok=True)
-plt.savefig(f"figures/eval/{batch_size}/eval_generate_sample_{'MNIST' if Test else 'custom'}_denoised.png", bbox_inches='tight')
+os.makedirs(f"figures/{Dataset}/eval/{batch_size}", exist_ok=True)
+plt.savefig(f"figures/{Dataset}/eval/{batch_size}/eval_generate_sample_denoised.png", bbox_inches='tight')
 plt.close()
 
 
