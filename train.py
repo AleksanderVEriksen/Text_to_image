@@ -131,6 +131,7 @@ if __name__ == "__main__":
     # * Initialize variables
     current_epoch = 0
     patience_counter = 0
+    best_fid_path = ""
     best_loss = float('inf')
     best_val_loss = float('inf')
     best_fid = float('inf')  # Initialize best FID for early stopping
@@ -345,6 +346,8 @@ if __name__ == "__main__":
 
     # *Start MLflow run for experiment tracking
     try:
+        if mlflow.active_run() is not None:
+            mlflow.end_run()
         with mlflow.start_run(run_name=f"{args.dataset}_bs{args.batch_size}_ep{num_epochs}" , experiment_id=EXPERIMENT_ID) as run:
             mlflow.log_params({
                 "epochs": num_epochs,
@@ -550,6 +553,42 @@ if __name__ == "__main__":
                             os.remove(worst_model_path)
                 if torch.cuda.is_available():
                     mlflow.log_metrics({"gpu_mem_used_bytes": torch.cuda.memory_allocated(0)}, step=current_epoch)
+        # *Print metrics and save final models
+        print(f"\nBest model saved with loss {best_loss:.4f}")
+        if best_fid_path:
+            print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
+        # Sampling block (unconditional preview first):
+        uncond_preview, _ = sample_images(
+        model, noise_scheduler, img_size, device,
+        n=16, labels=None, guidance_scale=None
+        )
+        torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
+
+        # Also save a separate file with EMA weights applied to the model (for easy inference)
+        ema_save_path = f"{save_dir}/{model_name}_EMA{'_test' if Dataset == 'mnist' else ''}.pth"
+        ema.apply_shadow(model)
+        # save checkpoint with ema.state_dict()
+        save_with_retry(
+            ema_save_path,
+            {
+                "model_state_dict": model.state_dict(),
+                "batch_size": batch_size
+            }
+        )
+        ema.restore(model)
+        print(f"EMA model saved as {ema_save_path}")
+
+        # Correct plot_losses call with epoch lists
+        plot_losses(
+            train_epochs,
+            train_epoch_losses,
+            val_epoch_points,
+            val_losses,
+            running_avg_losses,
+            save_path=f"figures/{args.dataset}/loss_curves/{args.batch_size}/loss_plot.png"
+        )
+        plot_fid(fid_scores, fid_epochs, save_path=f"figures/{args.dataset}/{args.batch_size}/fid_plot.png")
+        
     except (Exception, KeyboardInterrupt) as e:
         is_kb_interrupt = isinstance(e, KeyboardInterrupt)
         status = "interrupted" if is_kb_interrupt else "error"
@@ -561,38 +600,3 @@ if __name__ == "__main__":
         _end_mlflow_run(status="finished")
     
 
-    # *Print metrics and save final models
-    print(f"\nBest model saved with loss {best_loss:.4f}")
-    print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
-    # Sampling block (unconditional preview first):
-    uncond_preview, _ = sample_images(
-    model, noise_scheduler, img_size, device,
-    n=16, labels=None, guidance_scale=None
-    )
-    torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
-
-    # Also save a separate file with EMA weights applied to the model (for easy inference)
-    ema_save_path = f"{save_dir}/{model_name}_EMA{'_test' if Dataset == 'mnist' else ''}.pth"
-    ema.apply_shadow(model)
-    # save checkpoint with ema.state_dict()
-    save_with_retry(
-        ema_save_path,
-        {
-            "model_state_dict": model.state_dict(),
-            "batch_size": batch_size
-        }
-    )
-    ema.restore(model)
-    print(f"EMA model saved as {ema_save_path}")
-
-    # Correct plot_losses call with epoch lists
-    plot_losses(
-        train_epochs,
-        train_epoch_losses,
-        val_epoch_points,
-        val_losses,
-        running_avg_losses,
-        save_path=f"figures/{args.dataset}/loss_curves/{args.batch_size}/loss_plot.png"
-    )
-    plot_fid(fid_scores, fid_epochs, save_path=f"figures/{args.dataset}/{args.batch_size}/fid_plot.png")
-    
