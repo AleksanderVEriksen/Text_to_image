@@ -10,9 +10,14 @@ from torch import Tensor
 from torch.utils.data import DataLoader, random_split
 from torch.utils.data import Dataset as TorchDataset
 
-from typing import Any, cast, Optional, overload, Tuple, List, Literal
+from typing import Any, cast, Optional, overload, Tuple, List, Literal, Union
 from data import get_dataset, get_mnist_dataset
-from train import _end_mlflow_run
+# =========================================================
+# utils.py
+# =========================================================
+
+# Global logging status guard (default True; train.py may override)
+LOG_STATUS: bool = True
 
 # Defines the transformation to convert images to tensors normalized to [-1, 1]
 transform = transforms.Compose([
@@ -151,18 +156,38 @@ def estimate_dataset_stats(dataloader, max_batches=20, device='cpu'):
 # 4. Sampling & Snapshot Functions
 # ---------------------------------------------------------
 @overload
-def sample_images(model, scheduler, img_size: int, device, n:int=16,
-                labels: Optional[Tensor] = None, 
-                return_intermediates: Literal[False] = False, 
-                guidance_scale: Optional[float]=None) -> Tuple[Tensor, Tensor, List[Tensor]]: ...
+def sample_images(
+    model, 
+    scheduler, 
+    img_size: int, 
+    device, 
+    n: int = 16,
+    labels: Optional[Union[int, Tensor]] = None,
+    return_intermediates: Literal[True] = True,
+    guidance_scale: Optional[float] = None,
+) -> Tuple[Tensor, Tensor, List[Tensor]]: ...
 @overload
-def sample_images(model, scheduler, img_size: int, device, n: int = 16, 
-                labels: Optional[Tensor] = None, 
-                return_intermediates: Literal[False] = False, 
-                guidance_scale: Optional[float] = None) -> Tuple[Tensor, Tensor]: ...
+def sample_images(
+    model, 
+    scheduler, 
+    img_size: int, 
+    device, 
+    n: int = 16,
+    labels: Optional[Union[int, Tensor]] = None,
+    return_intermediates: Literal[False] = False,
+    guidance_scale: Optional[float] = None,
+) -> Tuple[Tensor, Tensor]: ...
 
-def sample_images(model, scheduler, img_size, device, n=16,
-labels=None, return_intermediates=False, guidance_scale=None):
+def sample_images(
+    model,
+    scheduler,
+    img_size: int,
+    device,
+    n: int = 16,
+    labels: Optional[Union[int, Tensor]] = None,
+    return_intermediates: bool = False,
+    guidance_scale: Optional[float] = None,
+):
     """Generate n final denoised samples (optionally capture intermediates).
     Classifier-free guidance is applied here (external to model) if guidance_scale provided.
     """
@@ -665,10 +690,15 @@ def build_signature(num_channels: int, img_size: int, num_classes: int) -> Model
 # ==================== ML FLOW ===============================
 
 def disable_mlflow_logging() -> None:
-    # Disable MLflow and end the active run once
+    # Disable MLflow and end the active run once (avoid train import to prevent circular deps)
     global LOG_STATUS
     LOG_STATUS = False
-    _end_mlflow_run(status="error")
+    try:
+        if mlflow.active_run() is not None:
+            mlflow.end_run(status="error")
+    except Exception:
+        # ignore end_run errors during shutdown
+        pass
     try:
         mlflow.pytorch.autolog(disable=True)
     except Exception:
