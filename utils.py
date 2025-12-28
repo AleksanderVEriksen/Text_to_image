@@ -1,14 +1,23 @@
 import matplotlib.pyplot as plt
+import mlflow
 from torchvision import transforms
 import numpy as np, os, torch, torchvision, scipy.linalg, PIL.Image
 from torchvision.models import inception_v3, Inception_V3_Weights
 import torch.nn.functional as F
 from tqdm.auto import tqdm
 
+from torch import Tensor
+from torch.utils.data import DataLoader, random_split
+from torch.utils.data import Dataset as TorchDataset
+
+from typing import Any, cast, Optional, overload, Tuple, List, Literal
+from data import get_dataset, get_mnist_dataset
+from train import _end_mlflow_run
+
 # Defines the transformation to convert images to tensors normalized to [-1, 1]
 transform = transforms.Compose([
-    transforms.Resize((32, 32)),     # Added: ensure 32x32 so 2^5 downsamples align
-    transforms.ToTensor(),           # [0,1]
+    transforms.Resize((32, 32)),    # Added: ensure 32x32 so 2^5 downsamples align
+    transforms.ToTensor(),          # [0,1]
     transforms.Lambda(lambda x: 2 * x - 1)  # [-1,1]
 ])
 
@@ -141,9 +150,22 @@ def estimate_dataset_stats(dataloader, max_batches=20, device='cpu'):
 # ---------------------------------------------------------
 # 4. Sampling & Snapshot Functions
 # ---------------------------------------------------------
-def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=False,
-                labels=None, num_classes=10, return_intermediates=False, guidance_scale=None):
-    """Generate n final denoised samples (optionally capture intermediates)."""
+@overload
+def sample_images(model, scheduler, img_size: int, device, n:int=16,
+                labels: Optional[Tensor] = None, 
+                return_intermediates: Literal[False] = False, 
+                guidance_scale: Optional[float]=None) -> Tuple[Tensor, Tensor, List[Tensor]]: ...
+@overload
+def sample_images(model, scheduler, img_size: int, device, n: int = 16, 
+                labels: Optional[Tensor] = None, 
+                return_intermediates: Literal[False] = False, 
+                guidance_scale: Optional[float] = None) -> Tuple[Tensor, Tensor]: ...
+
+def sample_images(model, scheduler, img_size, device, n=16,
+labels=None, return_intermediates=False, guidance_scale=None):
+    """Generate n final denoised samples (optionally capture intermediates).
+    Classifier-free guidance is applied here (external to model) if guidance_scale provided.
+    """
     model.eval()
     with torch.no_grad():
         x = torch.randn(n, model.in_channels, img_size, img_size, device=device)
@@ -155,11 +177,15 @@ def sample_images(model, scheduler, img_size, device, n=16, Test=False, debug=Fa
                 if labels.shape[0] != n:
                     labels = labels.repeat(n)[:n]
         intermediates = []
-        # FIX: iterate over scheduler.timesteps (tensor) not integer
         for t in scheduler.timesteps:
             t_scalar = int(t.item()) if hasattr(t, "item") else int(t)
-            eps = model(x, torch.tensor([t_scalar] * n, device=device),
-                        labels=labels, guidance_scale=guidance_scale)
+            t_batch = torch.tensor([t_scalar] * n, device=device)
+            if guidance_scale is not None and labels is not None:
+                eps_cond = model(x, t_batch, labels=labels)
+                eps_uncond = model(x, t_batch, labels=None)
+                eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
+            else:
+                eps = model(x, t_batch, labels=labels)
             step_out = scheduler.step(eps, t, x)
             x = step_out.prev_sample
             if return_intermediates:
@@ -230,7 +256,6 @@ def sample_intermediates(model, scheduler, img_size, device, n=1, in_channels=1,
     if not out_imgs:
         return torch.empty(0, in_channels, img_size, img_size), torch.tensor([], dtype=torch.long)
     return torch.cat(out_imgs, dim=0), torch.tensor(out_ts, dtype=torch.long, device=device)
-
 # ---------------------------------------------------------
 # 5. Loss / SNR Weighting
 # ---------------------------------------------------------
@@ -265,7 +290,7 @@ def calculate_fid(real_images, generated_images, device='cuda', show_progress=Fa
     assert generated_images.min() >= -0.01 and generated_images.max() <= 1.01
 
     inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1,
-                             transform_input=False).to(device)
+                            transform_input=False).to(device)
     inception.eval()
 
     def prep(imgs):
@@ -302,6 +327,37 @@ def calculate_fid(real_images, generated_images, device='cuda', show_progress=Fa
         covmean = covmean.real
     fid = diff.dot(diff) + np.trace(sigma_r + sigma_g - 2 * covmean)
     return float(fid)
+
+def calculate_inception_score(images, device='cuda', show_progress=False, chunk_size=64):
+    """Compute Inception Score (IS) on generated images in [0,1].
+    IS = exp(E_x KL(p(y|x) || p(y))). Uses Inception v3 softmax.
+    """
+    assert images.min() >= -0.01 and images.max() <= 1.01
+    inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1,
+                             transform_input=False).to(device)
+    inception.eval()
+
+    def prep(imgs):
+        imgs = F.interpolate(imgs, size=(299, 299), mode='bilinear', align_corners=False)
+        if imgs.shape[1] == 1:
+            imgs = imgs.repeat(1, 3, 1, 1)
+        imgs = torch.clamp(imgs, 0, 1)
+        return imgs
+
+    preds = []
+    iterator = range(0, images.shape[0], chunk_size)
+    if show_progress:
+        iterator = tqdm(iterator, desc="IS features", leave=False)
+    with torch.no_grad():
+        for start in iterator:
+            batch = prep(images[start:start+chunk_size].to(device))
+            logits = inception(batch)
+            prob = torch.softmax(logits, dim=1)
+            preds.append(prob)
+    probs = torch.cat(preds, dim=0)
+    py = probs.mean(dim=0, keepdim=True)
+    kl = (probs * (probs.log() - py.log())).sum(dim=1)
+    return float(torch.exp(kl.mean()).item())
 
 # ---------------------------------------------------------
 # 7. Plotting
@@ -370,6 +426,7 @@ def plot_fid(fids, fid_epochs, save_path="figures/fid_plot.png", save_json=True)
 # ---------------------------------------------------------
 def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
              max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
+             calculate_is_score=False, is_epoch_calc=10,
              img_size=32, show_progress=True, fid_progress=True, fid_min_samples=512):
     """Validation loop computing average loss and optional FID with progress bars."""
     import torch
@@ -408,6 +465,7 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
                 break
     avg_val_loss = val_loss / max(1, batches)
     do_fid = calculate_fid_score and (epochs % fid_epoch_calc == 0)
+    do_is = calculate_is_score and (epochs % is_epoch_calc == 0)
     if do_fid and images_accum:
         real_batch = torch.cat(images_accum, dim=0)
         if real_batch.size(0) < fid_min_samples:
@@ -417,13 +475,19 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
         gen_batch, _ = sample_images(
             model, noise_scheduler, img_size, device,
             n=real_batch.shape[0], labels=labels_ref if labels_ref is not None else None,
-            guidance_scale=None  # unconditional for FID stability
+            guidance_scale=None,  # unconditional for FID stability
+            return_intermediates=False
         )
         fid_score = calculate_fid(real_batch.to(device), gen_batch.to(device), device=device, show_progress=fid_progress)
+        if do_is:
+            is_score = calculate_inception_score(gen_batch.to(device), device=device, show_progress=fid_progress)
+        else:
+            is_score = None
     return {
         "val_loss": avg_val_loss,
         "running_avg_loss": avg_val_loss,
-        "fid_score": fid_score
+        "fid_score": fid_score,
+        "is_score": is_score
     }
 
 def text_to_label(label, max_num_classes: int = 10):
@@ -539,10 +603,46 @@ def sample_to_tensor(sample):
         return transform(sample['jpg'])
     else:
         return transform(sample[0])
-    
+# ==================== Load data from data.py ===============================
 
+def load_data_from_dataset(dataset_name: str, batch_size: int, Augment: bool):
+        # *Load dataset from data.py
+    if dataset_name == "custom":
+        print("Training on custom dataset")
+
+        train = get_dataset(train=True)
+        test = get_dataset(test=True)
+        val = get_dataset(val=True)
+
+        train_ds = cast(TorchDataset[Any], train)
+        val_ds = cast(TorchDataset[Any], val)
+        test_ds = cast(TorchDataset[Any], test)
+
+        train_dataloader = cast(DataLoader[Any], DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn))
+        val_dataloader = cast(DataLoader[Any], DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn))
+        test_dataloader = cast(DataLoader[Any], DataLoader(test_ds, batch_size=batch_size, collate_fn=collate_fn))
+
+        return train_dataloader, val_dataloader, test_dataloader
+    
+    elif dataset_name == "mnist":
+        # *Load example dataset for testing
+        print("\n---Training on MNIST dataset---")
+        train_ = get_mnist_dataset(train=True, augment=Augment)
+        test_ = get_mnist_dataset(train=False, augment=False)
+
+        train_size = int(len(train_) * 0.8)
+        val_size = len(train_) - train_size
+        train, val = random_split(train_, [train_size, val_size] )
+
+        train_dataloader = DataLoader(train, batch_size=batch_size, collate_fn=collate_fn)
+        val_dataloader = DataLoader(val, batch_size=batch_size, collate_fn=collate_fn)
+        test_dataloader = DataLoader(test_, batch_size=batch_size, collate_fn=collate_fn)
+        
+        return train_dataloader, val_dataloader, test_dataloader
+    else:
+        raise ValueError(f"Unsupported dataset: {dataset_name}")
 # =========================================================
-from typing import Union, List, cast
+from typing import Any, Union, List, cast
 from mlflow.types import ColSpec, TensorSpec
 from mlflow.models import ModelSignature
 from mlflow.types import Schema
@@ -562,3 +662,51 @@ def build_signature(num_channels: int, img_size: int, num_classes: int) -> Model
         inputs=Schema(cast(List[Union[TensorSpec, ColSpec]], input_specs)),
         outputs=Schema(cast(List[Union[TensorSpec, ColSpec]], output_specs)),
     )
+# ==================== ML FLOW ===============================
+
+def disable_mlflow_logging() -> None:
+    # Disable MLflow and end the active run once
+    global LOG_STATUS
+    LOG_STATUS = False
+    _end_mlflow_run(status="error")
+    try:
+        mlflow.pytorch.autolog(disable=True)
+    except Exception:
+        pass
+
+def log_metrics_safe(metrics: dict, step: int) -> None:
+    # Unified metrics logging with BAD_REQUEST handling
+    if not LOG_STATUS:
+        return
+    try:
+        mlflow.log_metrics(metrics, step=step)
+    except Exception as e:
+        print(f"MLflow metrics logging failed: {e}")
+        if "BAD_REQUEST" in str(e):
+            disable_mlflow_logging()
+
+def log_artifact_safe(local_path: str, artifact_path: Optional[str] = None) -> None:
+    # Optional: reuse for artifact logging
+    if not LOG_STATUS:
+        return
+    try:
+        mlflow.log_artifact(local_path, artifact_path=artifact_path)
+    except Exception as e:
+        print(f"MLflow artifact logging failed: {e}")
+        if "BAD_REQUEST" in str(e):
+            disable_mlflow_logging()
+
+def log_model_safe(model, name: str, signature, pip_requirements=None, metadata=None):
+    # Optional: reuse if you keep mlflow.pytorch.log_model
+    if not LOG_STATUS:
+        return None
+    try:
+        return mlflow.pytorch.log_model(
+            model, name=name, signature=signature,
+            pip_requirements=pip_requirements, metadata=metadata
+        )
+    except Exception as e:
+        print(f"MLflow model logging failed: {e}")
+        if "BAD_REQUEST" in str(e):
+            disable_mlflow_logging()
+        return None

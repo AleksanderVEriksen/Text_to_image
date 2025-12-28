@@ -77,7 +77,7 @@ class LabelEmbedding(nn.Module):
         return x  # (batch_size, emb_dim)
 
 class UNET(nn.Module):
-    # *UNET for 2 channel images (RGB)
+    # UNET for grayscale (1ch) or RGB (3ch) images
     def __init__(self, in_channels=1, base_channels=64, num_classes=10,
                  time_emb_dim=256, label_emb_dim=128, fuse_dim=512, label_dropout=0.1):
         super().__init__()
@@ -111,14 +111,21 @@ class UNET(nn.Module):
 
         self.max_pool_2x2 = nn.MaxPool2d(2)
 
-        # Decoder blocks
-        self.up_trans1 = nn.ConvTranspose2d(base_channels * 8, base_channels * 8, 2, 2)
+        # Decoder blocks (Upsample + 1x1 Conv to reduce channels)
+        self.up_sample1 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_reduce1 = nn.Conv2d(base_channels * 8, base_channels * 8, kernel_size=1)
         self.up_conv1 = self._block(base_channels * 16, base_channels * 8)
-        self.up_trans2 = nn.ConvTranspose2d(base_channels * 8, base_channels * 4, 2, 2)
+
+        self.up_sample2 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_reduce2 = nn.Conv2d(base_channels * 8, base_channels * 4, kernel_size=1)
         self.up_conv2 = self._block(base_channels * 8, base_channels * 4)
-        self.up_trans3 = nn.ConvTranspose2d(base_channels * 4, base_channels * 2, 2, 2)
+
+        self.up_sample3 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_reduce3 = nn.Conv2d(base_channels * 4, base_channels * 2, kernel_size=1)
         self.up_conv3 = self._block(base_channels * 4, base_channels * 2)
-        self.up_trans4 = nn.ConvTranspose2d(base_channels * 2, base_channels, 2, 2)
+
+        self.up_sample4 = nn.Upsample(scale_factor=2, mode='nearest')
+        self.up_reduce4 = nn.Conv2d(base_channels * 2, base_channels, kernel_size=1)
         self.up_conv4 = self._block(base_channels * 2, base_channels)
 
         self.out = nn.Conv2d(base_channels, in_channels, kernel_size=1)
@@ -156,58 +163,60 @@ class UNET(nn.Module):
         x4 = self._inject(self.down_conv4(self.max_pool_2x2(x3)), fused, self.emb_proj4)
         x5 = self._inject(self.down_conv5(self.max_pool_2x2(x4)), fused, self.emb_proj5)
 
-        # Decoder with injections
-        x = self.up_trans1(x5)
+        # Decoder with injections (upsample + 1x1 conv channel adjust)
+        x = self.up_sample1(x5)
+        x = self.up_reduce1(x)
         x = torch.cat([x, crop_tensor(x4, x)], 1)
         x = self._inject(self.up_conv1(x), fused, self.up_emb_proj1)
 
-        x = self.up_trans2(x)
+        x = self.up_sample2(x)
+        x = self.up_reduce2(x)
         x = torch.cat([x, crop_tensor(x3, x)], 1)
         x = self._inject(self.up_conv2(x), fused, self.up_emb_proj2)
 
-        x = self.up_trans3(x)
+        x = self.up_sample3(x)
+        x = self.up_reduce3(x)
         x = torch.cat([x, crop_tensor(x2, x)], 1)
         x = self._inject(self.up_conv3(x), fused, self.up_emb_proj3)
 
-        x = self.up_trans4(x)
+        x = self.up_sample4(x)
+        x = self.up_reduce4(x)
         x = torch.cat([x, crop_tensor(x1, x)], 1)
         x = self._inject(self.up_conv4(x), fused, self.up_emb_proj4)
 
         return self.out(x)
 
-    @autocast(device_type='cuda', enabled=True)
-    def forward(self, x, timesteps, labels=None, guidance_scale=None):
-        # Assertions
-        assert x.shape[2] == 32 and x.shape[3] == 32, f"Expect 32x32 inputs, got {x.shape}"
-        t_emb = self.time_mlp(self.time_embed(timesteps))  # (B, fuse_dim)
+    def forward(self, x, timesteps, labels=None, amp=True):
+        device_type = 'cuda' if x.is_cuda else ('mps' if x.device.type == 'mps' else 'cpu')
+        use_amp = amp and (device_type in ('cuda','cpu'))  # torch.amp supports cpu/cuda
+        with autocast(device_type=device_type, enabled=use_amp):
+            # Assertions
+            assert x.shape[2] == 32 and x.shape[3] == 32, f"Expect 32x32 inputs, got {x.shape}"
+            t_emb = self.time_mlp(self.time_embed(timesteps))  # (B, fuse_dim)
 
-        # Classifier-free dropout
-        if labels is not None and self.training and self.label_dropout > 0:
-            drop_mask = torch.rand_like(labels.float()) < self.label_dropout
-            labels_cf = labels.clone()
-            labels_cf[drop_mask] = -1
-        else:
-            labels_cf = labels
+            # Classifier-free dropout
+            if labels is not None and self.training and self.label_dropout > 0:
+                drop_mask = torch.rand_like(labels.float()) < self.label_dropout
+                labels_cf = labels.clone()
+                labels_cf[drop_mask] = -1
+            else:
+                labels_cf = labels
 
-        def encode_labels(lab):
-            if lab is None or (lab == -1).all():
-                null = self.null_label_embedding.expand(x.size(0), -1)
-                return self.label_mlp(null)
-            emb = self.label_embedding(torch.clamp(lab, min=0))
-            return self.label_mlp(emb)
+            def encode_labels(lab):
+                B = x.size(0)
+                if lab is None:
+                    lab = torch.full((B,), -1, device=x.device, dtype=torch.long)
+                mask = (lab == -1)
+                # Embed real labels (clamping ensures valid indices) and get null emb
+                real_emb = self.label_embedding(torch.clamp(lab, min=0))
+                null_emb = self.null_label_embedding.expand(B, -1)
+                # Select per-sample null vs real, then MLP
+                mixed = torch.where(mask.unsqueeze(1), null_emb, real_emb)
+                return self.label_mlp(mixed)
 
-        cond_lab_emb = encode_labels(labels_cf if labels is not None else None)
-        cond_fused = self.fuse_proj(t_emb + cond_lab_emb)
-
-        if guidance_scale is None or labels is None:
+            cond_lab_emb = encode_labels(labels_cf if labels is not None else None)
+            cond_fused = self.fuse_proj(t_emb + cond_lab_emb)
             return self._forward_core(x, cond_fused)
-
-        # Unconditional path
-        null_lab_emb = encode_labels(torch.full_like(labels, -1))
-        null_fused = self.fuse_proj(t_emb + null_lab_emb)
-        eps_cond = self._forward_core(x.clone(), cond_fused)
-        eps_null = self._forward_core(x, null_fused)
-        return eps_null + guidance_scale * (eps_cond - eps_null)
 
 
 class BasicUNet(nn.Module):
@@ -271,7 +280,8 @@ class BasicUNet(nn.Module):
 
 
 if __name__ == "__main__":
-    model = UNET()
-    Image = torch.randn((1, 3, 572, 572))
-    t = torch.tensor([0])  # Example timestep
-    print(model(Image, t))
+    model = UNET(in_channels=1)
+    x = torch.randn(1, 1, 32, 32)
+    t = torch.tensor([0])
+    y = model(x, t, labels=torch.tensor([1]))
+    print("ok:", y.shape)

@@ -1,10 +1,11 @@
 from diffusers import DDPMScheduler
 from training import train_epoch
 import warnings
+import time
 # -----------------------------------------------
 from torch.utils.data import DataLoader, random_split
 import torchvision
-from typing import Any, cast, Optional
+
 from torch.utils.data import Dataset as TorchDataset
 # -----------------------------------------------
 import torch
@@ -46,12 +47,16 @@ from utils import (
     set_global_seed,
     save_config,
     plot_fid,
-    collate_fn,
+    load_data_from_dataset,
     save_with_retry,
     sample_images,
     validate,
     plot_losses,
     build_signature,
+    disable_mlflow_logging,
+    log_metrics_safe,
+    log_model_safe,
+    log_artifact_safe
     # Newly used / available helpers
 )
 # Clear cache
@@ -66,27 +71,14 @@ autocast_device = "cuda" if device.type == "cuda" else "cpu"
 scaler = GradScaler()
 # ----------------------------------------------
 # Enable MLflow autologging for PyTorch
-mlflow.pytorch.autolog()
+mlflow.pytorch.autolog(log_models=False)
 mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "databricks"))
 # IMPORTANT: Enable system metrics monitoring
 mlflow.config.enable_system_metrics_logging()
-mlflow.config.set_system_metrics_sampling_interval(1)
-# Stop any previous runs
-if mlflow.active_run() is not None:
-    mlflow.end_run()
-# Log system info
-mlflow.log_params({
-    "device": device.type,
-    "os": platform.platform(),
-})
-if torch.cuda.is_available():
-    props = torch.cuda.get_device_properties(0)
-    mlflow.log_params({
-        "gpu_name": torch.cuda.get_device_name(0),
-        "gpu_total_mem_bytes": props.total_memory,
-        "cuda_version": torch.version.cuda,
-        "cudnn_version": torch.backends.cudnn.version(),
-    })
+mlflow.config.set_system_metrics_sampling_interval(600)  # log every 10 minutes
+# ----------------------------------------------
+
+# Defer system info logging until inside an explicit MLflow run
 # ----------------------------------------------
 # Suppress the LR scheduler deprecation warning
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")
@@ -112,6 +104,7 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--top_k_models", type=int, default=3)
     parser.add_argument("--fid_epoch_calc", type=int, default=20)
+    parser.add_argument("--is_epoch_calc", type=int, default=20, help="Epoch interval to compute Inception Score")
     parser.add_argument("--use_weighted_snr", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     return parser.parse_args()
@@ -128,6 +121,7 @@ if __name__ == "__main__":
     Dataset = args.dataset
     Augment = args.augment
     FID_EPOCH_CALC = args.fid_epoch_calc
+    IS_EPOCH_CALC = args.is_epoch_calc
     # * Initialize variables
     current_epoch = 0
     patience_counter = 0
@@ -187,35 +181,9 @@ if __name__ == "__main__":
 
 
     # *Load dataset from data.py
-    if args.dataset == "custom":
-        print("Training on custom dataset")
-
-        train = get_dataset(train=True)
-        test = get_dataset(test=True)
-        val = get_dataset(val=True)
-
-        train_ds = cast(TorchDataset[Any], train)
-        val_ds = cast(TorchDataset[Any], val)
-        test_ds = cast(TorchDataset[Any], test)
-
-        train_dataloader = cast(DataLoader[Any], DataLoader(train_ds, batch_size=batch_size, collate_fn=collate_fn))
-        val_dataloader = cast(DataLoader[Any], DataLoader(val_ds, batch_size=batch_size, collate_fn=collate_fn))
-        test_dataloader = cast(DataLoader[Any], DataLoader(test_ds, batch_size=batch_size, collate_fn=collate_fn))
-
-    elif args.dataset == "mnist":
-        # *Load example dataset for testing
-        print("\n---Training on MNIST dataset---")
-        train_ = get_mnist_dataset(train=True, augment=Augment)
-        test_ = get_mnist_dataset(train=False, augment=False)
-
-        train_size = int(len(train_) * 0.8)
-        val_size = len(train_) - train_size
-        train, val = random_split(train_, [train_size, val_size] )
-
-        train_dataloader = DataLoader(train, batch_size=batch_size, collate_fn=collate_fn)
-        val_dataloader = DataLoader(val, batch_size=batch_size, collate_fn=collate_fn)
-        test_dataloader = DataLoader(test_, batch_size=batch_size, collate_fn=collate_fn)
-
+    train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment)
+    
+    
     # *Create the UNET model
     if args.model == "Basic":
         model = BasicUNet(in_channels=num_channels, num_classes=num_classes).to(device)
@@ -344,11 +312,13 @@ if __name__ == "__main__":
 
     train_epoch_losses = []  # per-epoch losses (for plotting)
 
+    LOG_STATUS = True  # Set to False to disable MLflow logging
+
     # *Start MLflow run for experiment tracking
     try:
         if mlflow.active_run() is not None:
             mlflow.end_run()
-        with mlflow.start_run(run_name=f"{args.dataset}_bs{args.batch_size}_ep{num_epochs}" , experiment_id=EXPERIMENT_ID) as run:
+        with mlflow.start_run(run_name=f"{args.dataset}_bs{args.batch_size}_ep{num_epochs}", experiment_id=EXPERIMENT_ID, nested=True) as run:
             mlflow.log_params({
                 "epochs": num_epochs,
                 "batch_size": args.batch_size,
@@ -359,8 +329,23 @@ if __name__ == "__main__":
                 "augment": args.augment,
                 "seed": args.seed
             })
+            # Log system info within the active run (prevents implicit extra runs)
+            mlflow.log_params({
+                "device": device.type,
+                "os": platform.platform(),
+            })
+            if torch.cuda.is_available():
+                props = torch.cuda.get_device_properties(0)
+                mlflow.log_params({
+                    "gpu_name": torch.cuda.get_device_name(0),
+                    "gpu_total_mem_bytes": props.total_memory,
+                    "cuda_version": torch.version.cuda,
+                    "cudnn_version": torch.backends.cudnn.version(),
+                })
             for epoch in range(start_epoch, num_epochs):
                 current_epoch += 1
+                # Print time
+                start_time = time.time()
                 # train_epoch should already average over dataloader; if not, divide by len(train_dataloader)
                 epoch_loss = train_epoch(
                     model, train_dataloader, noise_scheduler, optimizer,
@@ -370,32 +355,39 @@ if __name__ == "__main__":
 
                 # * Validation step
                 if (current_epoch) % args.val_every == 0:
-                    val_results = validate(
-                        model,
-                        current_epoch,
-                        val_dataloader,
-                        noise_scheduler,
-                        loss_fn,
-                        device,
-                        max_batches=args.val_max_batches,
-                        calculate_fid_score=True,
-                        fid_epoch_calc=FID_EPOCH_CALC,
-                        img_size=img_size
-                    )
+                    # Use EMA weights for validation and optional FID sampling
+                    ema.apply_shadow(model)
+                    try:
+                        val_results = validate(
+                            model,
+                            current_epoch,
+                            val_dataloader,
+                            noise_scheduler,
+                            loss_fn,
+                            device,
+                            max_batches=args.val_max_batches,
+                            calculate_fid_score=True,
+                            fid_epoch_calc=FID_EPOCH_CALC,
+                            calculate_is_score=True,
+                            is_epoch_calc=IS_EPOCH_CALC,
+                            img_size=img_size
+                        )
+                    finally:
+                        ema.restore(model)
                     val_loss = val_results['val_loss']
                     running_avg_loss = val_results['running_avg_loss']
                     fid_score = val_results.get('fid_score', None)
+                    is_score = val_results.get('is_score', None)
 
                     val_losses.append(val_loss)
                     running_avg_losses.append(running_avg_loss)
                     val_epoch_points.append(current_epoch)
 
-                    mlflow.log_metrics({f"val_loss": val_loss}, step=current_epoch)
 
                     if fid_score is not None:
                         fid_scores.append(fid_score)
                         fid_epochs.append(current_epoch)
-                        mlflow.log_metrics({f"fid_score": fid_score}, step=current_epoch)
+
                         if fid_score < best_fid:
                             best_fid = fid_score
                             patience_counter = 0
@@ -445,9 +437,8 @@ if __name__ == "__main__":
                             img_size=img_size, 
                             device=device, 
                             n=n_images, 
-                            Test=True, 
                             labels=test_labels,
-                            num_classes=num_classes)
+                            )
                         ema.restore(model)
                         # sample_images may return (samples, intermediates) or a tensor/ndarray
                         if isinstance(generated_images, (list, tuple)):
@@ -473,12 +464,20 @@ if __name__ == "__main__":
                 train_epoch_losses.append(avg_epoch_loss)
                 train_epochs.append(current_epoch)
 
-                mlflow.log_metrics({f"train_loss": avg_epoch_loss}, step=current_epoch)
-
+                # Log metrics to MLflow
+                if (current_epoch) % args.val_every == 0:
+                    log_metrics_safe({"val_loss": val_loss}, step=current_epoch)
+                if fid_score is not None:
+                    log_metrics_safe({"fid_score": fid_score}, step=current_epoch)
+                if is_score is not None:
+                    log_metrics_safe({"is_score": is_score}, step=current_epoch)
+                if (current_epoch % 10 == 0 or epoch == 0):
+                    log_metrics_safe({"train_loss": avg_epoch_loss}, step=current_epoch)
+                    
                 # Print metrics
-                print(f"\nEpoch {epoch+1}/{num_epochs}")
+                print(f"\nEpoch {current_epoch}/{num_epochs}")
                 print(f"Training loss: {avg_epoch_loss:.4f}")
-                if (epoch + 1) % args.val_every == 0:
+                if (current_epoch) % args.val_every == 0:
                     print(f"Validation loss: {val_loss:.4f}")
                     print(f"Running avg val loss: {running_avg_loss:.4f}")
                     print(f"Best validation loss: {min(val_losses):.4f}")
@@ -486,6 +485,12 @@ if __name__ == "__main__":
                         print(f"FID score: {fid_score:.4f}")
                         print(f"Best FID: {best_fid:.4f}")
                         print(f"Patience counter: {patience_counter}/{args.patience}")
+                    if is_score is not None and current_epoch % IS_EPOCH_CALC == 0:
+                        print(f"Inception Score: {is_score:.4f}")
+                
+                end_time = time.time()
+                print(f"Time: {end_time - start_time:.2f} seconds")
+
                 print("-" * 50)
                 
                 # * ------------------ Save model checkpoints ------------------ *
@@ -529,39 +534,30 @@ if __name__ == "__main__":
 
                     #* Log checkpoint at the end of each epoch
                     signature = build_signature(num_channels=num_channels, img_size=img_size, num_classes=num_classes)
-                    model_info = mlflow.pytorch.log_model(model, 
-                                                        name=f"checkpoint_{current_epoch}",
-                                                        signature=signature,
-                                                        pip_requirements="requirements.txt",
-                                                        metadata={
-                                                            "dataset": args.dataset,
-                                                            "img_size": img_size,
-                                                            "num_classes": num_classes,
-                                                            "batch_size": batch_size,
-                                                            "epoch": current_epoch,
-                                                            "augment": Augment, 
-                                                        }
-                                                        )
-                    # Inspect the LoggedModel, now with metrics
-                    print(model_info.model_uri)
-                    
+                    if LOG_STATUS:
+                        log_artifact_safe(ckpt_path, artifact_path="model_checkpoints")
+                
+                    #* Manage top K models based on running average loss
                     top_models.append((running_avg_loss, ckpt_path))
                     top_models.sort(key=lambda x: x[0])
                     if len(top_models) > args.top_k_models:
                         _, worst_model_path = top_models.pop()
                         if os.path.exists(worst_model_path):
                             os.remove(worst_model_path)
-                if torch.cuda.is_available():
-                    mlflow.log_metrics({"gpu_mem_used_bytes": torch.cuda.memory_allocated(0)}, step=current_epoch)
-        # *Print metrics and save final models
+
         print(f"\nBest model saved with loss {best_loss:.4f}")
         if best_fid_path:
             print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
         # Sampling block (unconditional preview first):
-        uncond_preview, _ = sample_images(
-        model, noise_scheduler, img_size, device,
-        n=16, labels=None, guidance_scale=None
-        )
+        # Final unconditional preview using EMA weights
+        ema.apply_shadow(model)
+        try:
+            uncond_preview, _ = sample_images(
+            model, noise_scheduler, img_size, device,
+            n=16, labels=None, guidance_scale=None, return_intermediates=False
+            )
+        finally:
+            ema.restore(model)
         torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
 
         # Also save a separate file with EMA weights applied to the model (for easy inference)
@@ -598,5 +594,5 @@ if __name__ == "__main__":
         sys.exit(130 if is_kb_interrupt else 1)
     finally:
         _end_mlflow_run(status="finished")
-    
+
 

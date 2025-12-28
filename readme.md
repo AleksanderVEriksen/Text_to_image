@@ -10,6 +10,14 @@ Images (custom WebDataset or MNIST) plus optional textual/label conditioning. MN
 
 ![Architecture of the UNET](model_diagram_Mermaid.png "Mermaid image of model architecture")
 
+UNet variants (`UNET`, `BasicUNet`) with:
+
+- Sinusoidal time embeddings + MLP fusion.
+- Label embeddings with classifier‑free dropout during training.
+- Decoder uses upsample + 1×1 conv (instead of transposed conv) to reduce checkerboard artifacts.
+- Classifier‑free guidance is applied in the sampler (not inside `forward()`), mixing conditional and unconditional predictions externally.
+- AMP support and EMA weights used for validation/sampling to improve sample quality.
+
 ## PyTorch with CUDA
 
 Training uses PyTorch, mixed precision (AMP), optional EMA weights, and a DDPM noise scheduler.
@@ -28,9 +36,13 @@ Defines UNET and BasicUNet with sinusoidal time embeddings, label embeddings, an
 
 Grouped helper functions: seeding, checkpoints, sampling (forward diffusion reversal), SNR-weighted loss, FID with progress bars, plotting, validation, etc.
 
+New: Inception Score (IS) computation alongside FID.
+
 ### train.py
 
 Full training loop: DDPM noise addition, UNet noise prediction, SNR-weighted loss option, periodic validation, FID scheduling, sample grid saving, EMA maintenance, config.json writing.
+
+Validation and sampling use EMA weights. FID and IS can be reported at the same cadence.
 
 ### eval.py
 
@@ -89,14 +101,17 @@ Key arguments (see train.py parse_args):
 - --augment (flag): Enable data augmentation for MNIST (if implemented in data.py).
 - --patience (int, default 5): Early stopping patience on FID stagnation.
 - --top_k_models (int, default 3): Keep only lowest-loss recent checkpoints.
-- --fid_epoch_calc (int, default 50): Epoch interval to compute FID (set smaller for more frequent).
+ - --fid_epoch_calc (int, default 50): Epoch interval to compute FID.
+ - --is_epoch_calc (int, default 50): Epoch interval to compute Inception Score (IS).
 - --seed (int, default 42): Reproducibility.
+- --use_weighted_snr (flag): Enable SNR-based weighting of the noise-prediction loss.
 
 Implicit:
 
 - img_size chosen by dataset (32 for MNIST, 64 for custom).
 - EMA automatically maintained (decay 0.9999).
 - config.json saved under models/<batch_size>/.
+- Validation runs with EMA weights; metrics logged include train/val losses, FID, and IS.
 
 ### Eval
 
@@ -131,7 +146,7 @@ Arguments:
 - --label: Single or multi-label string (“7”, “one three”, “2,5,9”, “all”).
 - --num_samples (default 16): Grid size.
 - --num_classes (default 10)
-- --img_size (default 28, overridden by config if present).
+- --img_size (default 32, overridden by config if present).
 - --timesteps (default 1000): Rebuilt scheduler steps (overridden by config).
 - --out (default generated.png): Output image file path.
 - --batch_size: Folder key for locating weights/config.
@@ -168,6 +183,20 @@ Higher scale sharpens class fidelity but may reduce diversity.
 - Collected every fid_epoch_calc epochs (or adjust to more frequent).
 - Real images remapped from [-1,1] to [0,1].
 - InceptionV3 avgpool features → Fréchet distance.
+
+## Inception Score (IS)
+
+- Reported alongside FID on generated images only.
+- Computed with torchvision InceptionV3 softmax on resized inputs; measures confident class predictions and diversity.
+- Higher is better; trends are most useful (absolute values depend on domain and preproc).
+- For MNIST, IS is still informative for trends, though the classifier is ImageNet-trained.
+
+## MLflow Tracking
+
+- Autologging enabled (`mlflow.pytorch.autolog(log_models=False)`), tracking URI from `.env` via `MLFLOW_TRACKING_URI`; experiment ID via `MLFLOW_EXPERIMENT_ID`.
+- Logs params (device, OS, CUDA info), metrics (`train_loss`, `val_loss`, `fid_score`, `is_score`), and artifacts (checkpoints, sample grids).
+- System metrics logging enabled and sampled periodically.
+- To disable logging if needed, `utils.disable_mlflow_logging()` guards calls and ends the active run.
 
 ## EMA
 

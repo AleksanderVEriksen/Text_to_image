@@ -1,18 +1,16 @@
 import torch, torchvision, argparse, os, sys, numpy as np
-from torch.utils.data import DataLoader, random_split
 import matplotlib.pyplot as plt
 import torch.nn as nn
 from diffusers import DDPMScheduler
 from model import BasicUNet, UNET
-from data import get_dataset
-from utils import (
-    collate_fn, 
+from utils import ( 
     sample_images, 
     tensor_grid_to_numpy, 
     normalize_per_sample, 
     load_model_weights, 
     timesteps_to_str,  
-    set_global_seed
+    set_global_seed,
+    load_data_from_dataset
 )
 from ema import ExponentialMovingAverage
 import json, os
@@ -32,6 +30,7 @@ def parse_args():
     parser.add_argument("--model", type=str, default="UNET", help="Model type: UNET or Basic", choices=['UNET', 'Basic'])
     parser.add_argument("--model_name", type=str, default="model", help="Custom model name for saving")
     parser.add_argument("--num_classes", type=int, default=10, help="Number of classes for label embedding")
+    parser.add_argument("--Augment", action="store_true", help="Use data augmentation")
     parser.add_argument("--guidance_scale", type=float, default=None)
     return parser.parse_args()
 # ----------------------------------------------
@@ -42,6 +41,7 @@ Dataset = args.dataset
 Checkpoint = args.checkpoint
 model_name = args.model_name
 num_classes = args.num_classes
+Augment = args.Augment
 EMA = args.EMA
 img_size = 32 if Dataset == "mnist" else 64
 set_global_seed(42)
@@ -73,28 +73,7 @@ if EMA:
         model_name = args.model_name
 
 # Load dataset from data.py
-if Dataset == "mnist":
-    train, val, test = get_dataset()
-
-    train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
-    val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn, shuffle=True)
-    test_dataloader = DataLoader(test, batch_size, collate_fn=collate_fn, shuffle=False)
-
-elif Dataset == "custom":
-    # Load example dataset for testing
-    mnist_train = torchvision.datasets.MNIST(root="mnist/", train=True, download=True)
-    mnist_test = torchvision.datasets.MNIST(root="mnist/", train=False, download=True)
-
-    # small validation split from train for completeness
-    val_size = int(len(mnist_train) * 0.2)
-    train_size = len(mnist_train) - val_size
-    train, val = random_split(mnist_train, [train_size, val_size])
-
-
-    train_dataloader = DataLoader(train, batch_size, collate_fn=collate_fn, shuffle=True)
-    val_dataloader = DataLoader(val, batch_size, collate_fn=collate_fn, shuffle=True)
-    test_dataloader = DataLoader(mnist_test, batch_size, collate_fn=collate_fn, shuffle=False)
-
+train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment)
 
 # Create the UNET model
 in_ch = 1 if Dataset == "mnist" else 3
@@ -194,10 +173,9 @@ samples, timesteps_used = sample_images(
     img_size=img_size, 
     device=device, 
     n=16, 
-    Test=Test, 
-    debug=False, 
     labels=torch.arange(10).repeat(2)[:16],
-    num_classes=num_classes)
+    return_intermediates=False,
+    )
 ema.restore(model)                 # restore original weights after sampling
 
 # ensure samples is on CPU
@@ -301,15 +279,13 @@ samples_vis, timesteps_used = sample_images(
     img_size=img_size,
     device=device,
     n=16,
-    Test=Test,
-    labels=7 if Test else None,
-    num_classes=10,
+    labels=7 if Dataset=="mnist" else None,
     return_intermediates=False  # only final x0
 )
 
 # If guidance requested, run classifier-free guidance variant:
 guidance_scale = args.guidance_scale
-if guidance_scale is not None and Test:
+if guidance_scale is not None and Dataset=="mnist":
     with torch.no_grad():
         # duplicate conditional/unconditional passes handled inside model.forward when guidance_scale provided
         pass  # model already supports guidance when called with guidance_scale; adapt call if needed
