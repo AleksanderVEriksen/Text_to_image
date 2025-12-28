@@ -1,0 +1,82 @@
+%% Updated UNET Architecture with Upsample + 1x1 Conv and External Guidance Mixing
+flowchart TD
+    X["x_t (noisy image, N×C×H×W)"]
+    T["timestep t (N,)"]
+    L["labels or None (N,)"]
+
+    subgraph Conditioning
+        TE[SinusoidalTimeEmbedding]
+        TMLP["time_mlp (Linear→GELU→Linear)"]
+        LE["label_embedding / null_label"]
+        LMLP["label_mlp (Linear→GELU→Linear)"]
+        ADD[Add]
+        FP["fuse_proj (Linear)"]
+        T --> TE --> TMLP
+        L --> LE --> LMLP
+        TMLP --> ADD
+        LMLP --> ADD
+        ADD --> FP
+    end
+
+    subgraph Encoder
+        E1["down_conv1: Conv→GroupNorm→GELU→Conv→GroupNorm→GELU"]
+        E2[down_conv2]
+        E3[down_conv3]
+        E4[down_conv4]
+        E5[down_conv5]
+        MP["MaxPool2d(2)"]
+        X --> E1 --> MP --> E2 --> MP --> E3 --> MP --> E4 --> MP --> E5
+    end
+
+    %% Per-level conditioning injections: x + proj(fused)
+    FP -. emb_proj1 .-> E1
+    FP -. emb_proj2 .-> E2
+    FP -. emb_proj3 .-> E3
+    FP -. emb_proj4 .-> E4
+    FP -. emb_proj5 .-> E5
+
+    subgraph Decoder
+        U1["Upsample ×2"]
+        R1["1×1 Conv (channel align)"]
+        UC1["up_conv1: Conv→GN→GELU→Conv→GN→GELU"]
+        U2["Upsample ×2"]
+        R2["1×1 Conv"]
+        UC2[up_conv2]
+        U3["Upsample ×2"]
+        R3["1×1 Conv"]
+        UC3[up_conv3]
+        U4["Upsample ×2"]
+        R4["1×1 Conv"]
+        UC4[up_conv4]
+        OUT["Conv2d (1×1) → predicted noise ε"]
+
+        E5 --> U1 --> R1 --> UC1 --> U2 --> R2 --> UC2 --> U3 --> R3 --> UC3 --> U4 --> R4 --> UC4 --> OUT
+    end
+
+    %% Skip connections with cropping/padding to match shapes
+    E4 == crop/concat ==> UC1
+    E3 == crop/concat ==> UC2
+    E2 == crop/concat ==> UC3
+    E1 == crop/concat ==> UC4
+
+    %% Decoder per-level conditioning injections
+    FP -. up_emb_proj1 .-> UC1
+    FP -. up_emb_proj2 .-> UC2
+    FP -. up_emb_proj3 .-> UC3
+    FP -. up_emb_proj4 .-> UC4
+
+    %% External (sampler-side) classifier-free guidance
+    subgraph Sampler ["Sampler (external)"]
+        S1["ε_cond = UNET(x_t, t, labels)"]
+        S2["ε_uncond = UNET(x_t, t, None)"]
+        S3["ε = ε_uncond + s * (ε_cond - ε_uncond)"]
+        S4["DDPM scheduler.step(ε, t, x_t) → x_{t-1}"]
+        S1 --> S3
+        S2 --> S3
+        S3 --> S4
+    end
+
+    %% Notes
+    %% - EMA weights applied during validation/sampling for quality (optional flag to disable)
+    %% - AMP can be enabled; GroupNorm supports fp16 well
+    %% - Upsample + 1×1 Conv reduces checkerboard artifacts compared to transposed conv

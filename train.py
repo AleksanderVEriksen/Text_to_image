@@ -105,6 +105,7 @@ def parse_args():
     parser.add_argument("--top_k_models", type=int, default=3)
     parser.add_argument("--fid_epoch_calc", type=int, default=20)
     parser.add_argument("--is_epoch_calc", type=int, default=20, help="Epoch interval to compute Inception Score")
+    parser.add_argument("--no_ema_validate", action="store_true", help="Disable EMA weights during validation")
     parser.add_argument("--use_weighted_snr", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     return parser.parse_args()
@@ -356,7 +357,9 @@ if __name__ == "__main__":
                 # * Validation step
                 if (current_epoch) % args.val_every == 0:
                     # Use EMA weights for validation and optional FID sampling
-                    ema.apply_shadow(model)
+                    use_ema_val = not args.no_ema_validate
+                    if use_ema_val:
+                        ema.apply_shadow(model)
                     try:
                         val_results = validate(
                             model,
@@ -373,7 +376,8 @@ if __name__ == "__main__":
                             img_size=img_size
                         )
                     finally:
-                        ema.restore(model)
+                        if use_ema_val:
+                            ema.restore(model)
                     val_loss = val_results['val_loss']
                     running_avg_loss = val_results['running_avg_loss']
                     fid_score = val_results.get('fid_score', None)

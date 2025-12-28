@@ -101,10 +101,11 @@ Key arguments (see train.py parse_args):
 - --augment (flag): Enable data augmentation for MNIST (if implemented in data.py).
 - --patience (int, default 5): Early stopping patience on FID stagnation.
 - --top_k_models (int, default 3): Keep only lowest-loss recent checkpoints.
- - --fid_epoch_calc (int, default 50): Epoch interval to compute FID.
- - --is_epoch_calc (int, default 50): Epoch interval to compute Inception Score (IS).
+- --fid_epoch_calc (int, default 50): Epoch interval to compute FID.
+- --is_epoch_calc (int, default 50): Epoch interval to compute Inception Score (IS).
 - --seed (int, default 42): Reproducibility.
 - --use_weighted_snr (flag): Enable SNR-based weighting of the noise-prediction loss.
+- --no_ema_validate (flag): Disable EMA weights during validation (compare raw vs EMA performance).
 
 Implicit:
 
