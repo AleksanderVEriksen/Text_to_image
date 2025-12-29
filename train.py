@@ -3,9 +3,7 @@ from training import train_epoch
 import warnings
 import time
 # -----------------------------------------------
-from torch.utils.data import DataLoader, random_split
 import torchvision
-
 from torch.utils.data import Dataset as TorchDataset
 # -----------------------------------------------
 import torch
@@ -21,6 +19,8 @@ import numpy as np
 # MLflow for experiment tracking (if needed)
 import mlflow
 import platform
+import traceback
+from contextlib import nullcontext
 
 def _end_mlflow_run(status: str) -> None:
     try:
@@ -41,7 +41,6 @@ from model import UNET, BasicUNet
 # *Automatic Mixed Precision - saves memory and speeds up training
 from torch.amp import GradScaler
 import argparse
-from data import get_dataset, get_mnist_dataset
 from ema import ExponentialMovingAverage
 from utils import (
     set_global_seed,
@@ -53,7 +52,6 @@ from utils import (
     validate,
     plot_losses,
     build_signature,
-    disable_mlflow_logging,
     log_metrics_safe,
     log_model_safe,
     log_artifact_safe
@@ -69,16 +67,6 @@ autocast_device = "cuda" if device.type == "cuda" else "cpu"
 # ----------------------------------------------
 # Sets scaler
 scaler = GradScaler()
-# ----------------------------------------------
-# Enable MLflow autologging for PyTorch
-mlflow.pytorch.autolog(log_models=False)
-mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "databricks"))
-# IMPORTANT: Enable system metrics monitoring
-mlflow.config.enable_system_metrics_logging()
-mlflow.config.set_system_metrics_sampling_interval(600)  # log every 10 minutes
-# ----------------------------------------------
-
-# Defer system info logging until inside an explicit MLflow run
 # ----------------------------------------------
 # Suppress the LR scheduler deprecation warning
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")
@@ -108,6 +96,7 @@ def parse_args():
     parser.add_argument("--no_ema_validate", action="store_true", help="Disable EMA weights during validation")
     parser.add_argument("--use_weighted_snr", action="store_true", default=False)
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
+    parser.add_argument("--disable_mlflow", action="store_true", help="Disable MLflow logging and system metrics")
     return parser.parse_args()
 # ----------------------------------------------
 if __name__ == "__main__":
@@ -313,14 +302,31 @@ if __name__ == "__main__":
 
     train_epoch_losses = []  # per-epoch losses (for plotting)
 
-    LOG_STATUS = True  # Set to False to disable MLflow logging
+    LOG_STATUS = not args.disable_mlflow  # Controlled by CLI flag
+
+    # Configure MLflow (autolog + system metrics) only when enabled
+    if LOG_STATUS:
+        try:
+            mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "databricks"))
+            mlflow.pytorch.autolog(log_models=False)
+            # IMPORTANT: Enable system metrics monitoring
+            try:
+                mlflow.config.enable_system_metrics_logging()
+                mlflow.config.set_system_metrics_sampling_interval(600)
+            except Exception as e:
+                # Older MLflow versions may not have config API
+                print(f"MLflow system metrics config not available: {e}")
+        except Exception as e:
+            print(f"MLflow setup skipped: {e}")
 
     # *Start MLflow run for experiment tracking
     try:
-        if mlflow.active_run() is not None:
+        if LOG_STATUS and mlflow.active_run() is not None:
             mlflow.end_run()
-        with mlflow.start_run(run_name=f"{args.dataset}_bs{args.batch_size}_ep{num_epochs}", experiment_id=EXPERIMENT_ID, nested=True) as run:
-            mlflow.log_params({
+        run_ctx = mlflow.start_run(run_name=f"{args.dataset}_bs{args.batch_size}_ep{num_epochs}", experiment_id=EXPERIMENT_ID, nested=True) if LOG_STATUS else nullcontext()
+        with run_ctx as run:
+            if LOG_STATUS:
+                mlflow.log_params({
                 "epochs": num_epochs,
                 "batch_size": args.batch_size,
                 "model": args.model,
@@ -329,24 +335,28 @@ if __name__ == "__main__":
                 "dataset": args.dataset,
                 "augment": args.augment,
                 "seed": args.seed
-            })
-            # Log system info within the active run (prevents implicit extra runs)
-            mlflow.log_params({
-                "device": device.type,
-                "os": platform.platform(),
-            })
-            if torch.cuda.is_available():
-                props = torch.cuda.get_device_properties(0)
-                mlflow.log_params({
-                    "gpu_name": torch.cuda.get_device_name(0),
-                    "gpu_total_mem_bytes": props.total_memory,
-                    "cuda_version": torch.version.cuda,
-                    "cudnn_version": torch.backends.cudnn.version(),
                 })
+            # Log system info within the active run (prevents implicit extra runs)
+            if LOG_STATUS:
+                mlflow.log_params({
+                    "device": device.type,
+                    "os": platform.platform(),
+                })
+                if torch.cuda.is_available():
+                    props = torch.cuda.get_device_properties(0)
+                    mlflow.log_params({
+                        "gpu_name": torch.cuda.get_device_name(0),
+                        "gpu_total_mem_bytes": props.total_memory,
+                        "cuda_version": torch.version.cuda,
+                        "cudnn_version": torch.backends.cudnn.version(),
+                    })
             for epoch in range(start_epoch, num_epochs):
                 current_epoch += 1
                 # Print time
                 start_time = time.time()
+                # Initialize per-epoch optional metrics to ensure defined before checks
+                epoch_is_score = None
+                epoch_fid_score = None
                 # train_epoch should already average over dataloader; if not, divide by len(train_dataloader)
                 epoch_loss = train_epoch(
                     model, train_dataloader, noise_scheduler, optimizer,
@@ -380,20 +390,20 @@ if __name__ == "__main__":
                             ema.restore(model)
                     val_loss = val_results['val_loss']
                     running_avg_loss = val_results['running_avg_loss']
-                    fid_score = val_results.get('fid_score', None)
-                    is_score = val_results.get('is_score', None)
+                    epoch_fid_score = val_results.get('fid_score', None)
+                    epoch_is_score = val_results.get('is_score', None)
 
                     val_losses.append(val_loss)
                     running_avg_losses.append(running_avg_loss)
                     val_epoch_points.append(current_epoch)
 
 
-                    if fid_score is not None:
-                        fid_scores.append(fid_score)
+                    if epoch_fid_score is not None:
+                        fid_scores.append(epoch_fid_score)
                         fid_epochs.append(current_epoch)
 
-                        if fid_score < best_fid:
-                            best_fid = fid_score
+                        if epoch_fid_score < best_fid:
+                            best_fid = epoch_fid_score
                             patience_counter = 0
                             # apply EMA weights for saving best FID
                             if ema is not None:
@@ -403,8 +413,8 @@ if __name__ == "__main__":
                                 best_fid_path,
                                 {
                                     'epoch': epoch + 1,
-                                    'fid_score': fid_score,
                                     'best_fid': best_fid,
+                                    'is_score': epoch_is_score,
                                     'val_loss': val_loss,
                                     'running_avg_loss': running_avg_loss,
                                     'model_state_dict': model.state_dict(),
@@ -419,7 +429,7 @@ if __name__ == "__main__":
                             if ema is not None:
                                 # optional: restore original weights after save
                                 pass
-                            print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
+                            print(f"Saved best FID model to {best_fid_path} (FID={epoch_fid_score:.4f})")
                         else:
                             patience_counter += 1
                         if patience_counter > args.patience:
@@ -450,8 +460,8 @@ if __name__ == "__main__":
                         else:
                             generated_images = generated_images.cpu()
                     # save grid
-                    os.makedirs(f"figures/{args.dataset}/samples", exist_ok=True)
-                    sample_save_path = f"figures/{args.dataset}/samples/digit_7_epoch_{current_epoch}.png"
+                    os.makedirs(f"figures/{args.dataset}/samples/{args.batch_size}", exist_ok=True)
+                    sample_save_path = f"figures/{args.dataset}/samples/{args.batch_size}/digit_7_epoch_{current_epoch}.png"
                     try:
                         torchvision.utils.save_image(
                             generated_images,
@@ -470,14 +480,14 @@ if __name__ == "__main__":
 
                 # Log metrics to MLflow
                 if (current_epoch) % args.val_every == 0:
-                    log_metrics_safe({"val_loss": val_loss}, step=current_epoch)
-                if fid_score is not None:
-                    log_metrics_safe({"fid_score": fid_score}, step=current_epoch)
-                if is_score is not None:
-                    log_metrics_safe({"is_score": is_score}, step=current_epoch)
+                    log_metrics_safe({"val_loss": val_loss}, step=current_epoch, log_status=LOG_STATUS)
+                if epoch_fid_score is not None and current_epoch % FID_EPOCH_CALC == 0:
+                    log_metrics_safe({"fid_score": epoch_fid_score}, step=current_epoch, log_status=LOG_STATUS)
+                if epoch_is_score is not None and current_epoch % IS_EPOCH_CALC == 0:
+                    log_metrics_safe({"is_score": epoch_is_score}, step=current_epoch, log_status=LOG_STATUS)
                 if (current_epoch % 10 == 0 or epoch == 0):
-                    log_metrics_safe({"train_loss": avg_epoch_loss}, step=current_epoch)
-                    
+                    log_metrics_safe({"train_loss": avg_epoch_loss}, step=current_epoch, log_status=LOG_STATUS)
+                
                 # Print metrics
                 print(f"\nEpoch {current_epoch}/{num_epochs}")
                 print(f"Training loss: {avg_epoch_loss:.4f}")
@@ -485,12 +495,12 @@ if __name__ == "__main__":
                     print(f"Validation loss: {val_loss:.4f}")
                     print(f"Running avg val loss: {running_avg_loss:.4f}")
                     print(f"Best validation loss: {min(val_losses):.4f}")
-                    if fid_score is not None and current_epoch % FID_EPOCH_CALC == 0:
-                        print(f"FID score: {fid_score:.4f}")
+                    if epoch_fid_score is not None and current_epoch % FID_EPOCH_CALC == 0:
+                        print(f"FID score: {epoch_fid_score:.4f}")
                         print(f"Best FID: {best_fid:.4f}")
                         print(f"Patience counter: {patience_counter}/{args.patience}")
-                    if is_score is not None and current_epoch % IS_EPOCH_CALC == 0:
-                        print(f"Inception Score: {is_score:.4f}")
+                    if epoch_is_score is not None and current_epoch % IS_EPOCH_CALC == 0:
+                        print(f"Inception Score: {epoch_is_score:.4f}")
                 
                 end_time = time.time()
                 print(f"Time: {end_time - start_time:.2f} seconds")
@@ -538,8 +548,8 @@ if __name__ == "__main__":
 
                     #* Log checkpoint at the end of each epoch
                     signature = build_signature(num_channels=num_channels, img_size=img_size, num_classes=num_classes)
-                    if LOG_STATUS:
-                        log_artifact_safe(ckpt_path, artifact_path="model_checkpoints")
+                    
+                    log_artifact_safe(ckpt_path, artifact_path="model_checkpoints", log_status=LOG_STATUS)
                 
                     #* Manage top K models based on running average loss
                     top_models.append((running_avg_loss, ckpt_path))
@@ -551,15 +561,20 @@ if __name__ == "__main__":
 
         print(f"\nBest model saved with loss {best_loss:.4f}")
         if best_fid_path:
-            print(f"Saved best FID model to {best_fid_path} (FID={fid_score:.4f})")
+            print(f"Saved best FID model to {best_fid_path} (FID={best_fid:.4f})")
         # Sampling block (unconditional preview first):
+        os.makedirs(f"figures/{args.dataset}/samples/{args.batch_size}", exist_ok=True)
         # Final unconditional preview using EMA weights
         ema.apply_shadow(model)
         try:
-            uncond_preview, _ = sample_images(
-            model, noise_scheduler, img_size, device,
-            n=16, labels=None, guidance_scale=None, return_intermediates=False
+            result = sample_images(
+                model, noise_scheduler, img_size, device,
+                n=16, labels=None, guidance_scale=None, return_intermediates=False
             )
+            if isinstance(result, (list, tuple)):
+                uncond_preview = result[0]
+            else:
+                uncond_preview = result
         finally:
             ema.restore(model)
         torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
@@ -587,13 +602,21 @@ if __name__ == "__main__":
             running_avg_losses,
             save_path=f"figures/{args.dataset}/loss_curves/{args.batch_size}/loss_plot.png"
         )
-        plot_fid(fid_scores, fid_epochs, save_path=f"figures/{args.dataset}/{args.batch_size}/fid_plot.png")
+        plot_fid(fid_scores, fid_epochs, save_path=f"figures/{args.dataset}/fid/{args.batch_size}/fid_plot.png")
         
     except (Exception, KeyboardInterrupt) as e:
         is_kb_interrupt = isinstance(e, KeyboardInterrupt)
         status = "interrupted" if is_kb_interrupt else "error"
-        msg = f"Training interrupted by {'KeyboardInterrupt' if is_kb_interrupt else 'an error'}: {str(e)}"
-        print(msg)
+        if not is_kb_interrupt:
+            exc_type, exc_value, exc_tb = sys.exc_info()
+            tb_summary = traceback.extract_tb(exc_tb)
+            last = tb_summary[-1] if tb_summary else None
+            if last:
+                print(f"Error: {exc_type.__name__}: {exc_value} at {last.filename}:{last.lineno} in {last.name}")
+            # Print full traceback for context
+            traceback.print_exc()
+        else:
+            print("Training interrupted by KeyboardInterrupt")
         _end_mlflow_run(status=status)
         sys.exit(130 if is_kb_interrupt else 1)
     finally:

@@ -459,6 +459,7 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
     val_loss = 0.0
     batches = 0
     fid_score = None
+    is_score = None
     images_accum = []
     labels_ref = None
 
@@ -704,9 +705,11 @@ def disable_mlflow_logging() -> None:
     except Exception:
         pass
 
-def log_metrics_safe(metrics: dict, step: int) -> None:
+def log_metrics_safe(metrics: dict, step: int, log_status: Optional[bool] = None) -> None:
     # Unified metrics logging with BAD_REQUEST handling
-    if not LOG_STATUS:
+    if log_status is None:
+        log_status = LOG_STATUS
+    if not log_status:
         return
     try:
         mlflow.log_metrics(metrics, step=step)
@@ -715,9 +718,11 @@ def log_metrics_safe(metrics: dict, step: int) -> None:
         if "BAD_REQUEST" in str(e):
             disable_mlflow_logging()
 
-def log_artifact_safe(local_path: str, artifact_path: Optional[str] = None) -> None:
+def log_artifact_safe(local_path: str, artifact_path: Optional[str] = None, log_status: Optional[bool] = None) -> None:
     # Optional: reuse for artifact logging
-    if not LOG_STATUS:
+    if log_status is None:
+        log_status = LOG_STATUS
+    if not log_status:
         return
     try:
         mlflow.log_artifact(local_path, artifact_path=artifact_path)
@@ -726,9 +731,11 @@ def log_artifact_safe(local_path: str, artifact_path: Optional[str] = None) -> N
         if "BAD_REQUEST" in str(e):
             disable_mlflow_logging()
 
-def log_model_safe(model, name: str, signature, pip_requirements=None, metadata=None):
+def log_model_safe(model, name: str, signature, pip_requirements=None, metadata=None, log_status: Optional[bool] = None):
     # Optional: reuse if you keep mlflow.pytorch.log_model
-    if not LOG_STATUS:
+    if log_status is None:
+        log_status = LOG_STATUS
+    if not log_status:
         return None
     try:
         return mlflow.pytorch.log_model(

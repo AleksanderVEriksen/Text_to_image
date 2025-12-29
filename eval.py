@@ -270,7 +270,8 @@ with torch.no_grad():
     else:
         x0v = x0v.clamp(0,1)
     print("single-step x0 stats:", float(x0v.min()), float(x0v.max()), float(x0v.mean()), float(x0v.std()))
-    torchvision.utils.save_image(x0v, f"figures/{Dataset}/debug_single_step_x0.png", nrow=1)
+    os.makedirs(f"figures/{Dataset}/debug/{batch_size}", exist_ok=True)
+    torchvision.utils.save_image(x0v, f"figures/{Dataset}/debug/{batch_size}/debug_single_step_x0.png", nrow=1)
 
 # Generate fully denoised samples for the chosen label (e.g. 7)
 samples_vis, timesteps_used = sample_images(
