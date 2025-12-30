@@ -359,7 +359,7 @@ def calculate_inception_score(images, device='cuda', show_progress=False, chunk_
     """
     assert images.min() >= -0.01 and images.max() <= 1.01
     inception = inception_v3(weights=Inception_V3_Weights.IMAGENET1K_V1,
-                             transform_input=False).to(device)
+                            transform_input=False).to(device)
     inception.eval()
 
     def prep(imgs):
@@ -450,9 +450,9 @@ def plot_fid(fids, fid_epochs, save_path="figures/fid_plot.png", save_json=True)
 # 8. Misc / Validation Loop
 # ---------------------------------------------------------
 def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
-             max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
-             calculate_is_score=False, is_epoch_calc=10,
-             img_size=32, show_progress=True, fid_progress=True, fid_min_samples=512):
+            max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
+            calculate_is_score=False, is_epoch_calc=10,
+            img_size=32, show_progress=True, fid_progress=True, fid_min_samples=512):
     """Validation loop computing average loss and optional FID with progress bars."""
     import torch
     model.eval()
@@ -466,7 +466,7 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
     loader_iter = val_dataloader
     if show_progress:
         loader_iter = tqdm(val_dataloader, desc="Validate", leave=False, 
-                           position=0, dynamic_ncols=True)
+                        position=0, dynamic_ncols=True)
 
     with torch.no_grad():
         for batch in loader_iter:
@@ -511,7 +511,6 @@ def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
             is_score = None
     return {
         "val_loss": avg_val_loss,
-        "running_avg_loss": avg_val_loss,
         "fid_score": fid_score,
         "is_score": is_score
     }

@@ -354,6 +354,8 @@ if __name__ == "__main__":
                 current_epoch += 1
                 # Print time
                 start_time = time.time()
+                # Default previous-best running loss for this epoch (updated after validation)
+                prev_best_running = float('inf')
                 # Initialize per-epoch optional metrics to ensure defined before checks
                 epoch_is_score = None
                 epoch_fid_score = None
@@ -389,7 +391,15 @@ if __name__ == "__main__":
                         if use_ema_val:
                             ema.restore(model)
                     val_loss = val_results['val_loss']
-                    running_avg_loss = val_results['running_avg_loss']
+                    # Compute an EMA for running_avg_loss across validation epochs
+                    if running_avg_losses:
+                        _prev_running = running_avg_losses[-1]
+                        _beta = 0.9
+                        running_avg_loss = _beta * _prev_running + (1 - _beta) * val_loss
+                        prev_best_running = min(running_avg_losses)
+                    else:
+                        running_avg_loss = val_loss
+                        prev_best_running = float('inf')
                     epoch_fid_score = val_results.get('fid_score', None)
                     epoch_is_score = val_results.get('is_score', None)
 
@@ -487,10 +497,13 @@ if __name__ == "__main__":
                     log_metrics_safe({"is_score": epoch_is_score}, step=current_epoch, log_status=LOG_STATUS)
                 if (current_epoch % 10 == 0 or epoch == 0):
                     log_metrics_safe({"train_loss": avg_epoch_loss}, step=current_epoch, log_status=LOG_STATUS)
+                    if running_avg_loss is not None:
+                        log_metrics_safe({"running_avg_loss": running_avg_loss}, step=current_epoch, log_status=LOG_STATUS)
                 
                 # Print metrics
                 print(f"\nEpoch {current_epoch}/{num_epochs}")
                 print(f"Training loss: {avg_epoch_loss:.4f}")
+                print(f'Best training loss so far: {min(train_epoch_losses):.4f}')
                 if (current_epoch) % args.val_every == 0:
                     print(f"Validation loss: {val_loss:.4f}")
                     print(f"Running avg val loss: {running_avg_loss:.4f}")
@@ -509,7 +522,8 @@ if __name__ == "__main__":
                 
                 # * ------------------ Save model checkpoints ------------------ *
                 if (current_epoch) % args.val_every == 0: 
-                    if running_avg_loss == min(running_avg_losses):
+                    # Save when the EMA running avg improves over previous best
+                    if running_avg_loss < prev_best_running:
                         print("Running average validation loss improved. Saving checkpoint...")
                         best_model_path = f"{save_dir}/best_model.pth"
                         best_loss = running_avg_loss
