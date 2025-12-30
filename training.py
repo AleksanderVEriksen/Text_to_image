@@ -7,7 +7,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_s
 
 def train_epoch(model, dataloader, noise_scheduler, optimizer, loss_fn,
                 device, ema=None, grad_clip=1.0, mixed_precision=True, use_weighted_snr=False,
-                alphas_cumprod=None):
+                alphas_cumprod=None, min_snr_gamma: float = 5.0):
     """
     One training epoch with tqdm progress bar.
     Predicts added noise (standard DDPM objective).
@@ -40,7 +40,11 @@ def train_epoch(model, dataloader, noise_scheduler, optimizer, loss_fn,
 
         with autocast(device_type=device.type, enabled=mixed_precision):
             pred = model(noisy, timesteps, labels=labels)
-            loss = loss_fn(pred, noise) if not use_weighted_snr else weighted_noise_loss(pred, noise, alphas_cumprod, timesteps)
+            loss = (
+                loss_fn(pred, noise)
+                if not use_weighted_snr
+                else weighted_noise_loss(pred, noise, alphas_cumprod, timesteps, min_snr_gamma=min_snr_gamma)
+            )
 
         scaler.scale(loss).backward()
         if grad_clip is not None:

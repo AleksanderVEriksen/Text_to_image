@@ -103,19 +103,29 @@ else:
 checkpoint = load_model_weights(
     model,
     model_name=model_name,
+    dataset=Dataset,
     batch_size=batch_size,
     device=device,
     use_checkpoint=Checkpoint,
     use_ema=EMA
 )
-if checkpoint is not None:
-    optimizer.load_state_dict(checkpoint.get("optimizer_state_dict", {}))
-    ema.load_state_dict(checkpoint.get("ema_state", {}))
+if checkpoint is not None and isinstance(checkpoint, dict):
+    opt_state = checkpoint.get("optimizer_state_dict", None)
+    if isinstance(opt_state, dict) and "param_groups" in opt_state:
+        optimizer.load_state_dict(opt_state)
+    else:
+        print("Optimizer state not found in checkpoint; skipping optimizer.load_state_dict")
+    ema_state = checkpoint.get("ema_state", None)
+    if isinstance(ema_state, dict) and ema_state:
+        try:
+            ema.load_state_dict(ema_state)
+        except Exception as e:
+            print(f"EMA state not compatible; skipping. Reason: {e}")
 
 # Configurate the noise scheduler
 noise_scheduler = DDPMScheduler(
     num_train_timesteps=max_timesteps,
-    beta_schedule="scaled_linear",
+    beta_schedule="squaredcos_cap_v2", # scaled_linear | squaredcos_cap_v2
     beta_start=0.0001,
     beta_end=0.02,
     clip_sample=True

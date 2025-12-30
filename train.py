@@ -94,7 +94,8 @@ def parse_args():
     parser.add_argument("--fid_epoch_calc", type=int, default=20)
     parser.add_argument("--is_epoch_calc", type=int, default=20, help="Epoch interval to compute Inception Score")
     parser.add_argument("--no_ema_validate", action="store_true", help="Disable EMA weights during validation")
-    parser.add_argument("--use_weighted_snr", action="store_true", default=False)
+    parser.add_argument("--use_weighted_snr", action="store_true", default=True, help="Use SNR-weighted loss during training")
+    parser.add_argument("--min_snr_gamma", type=float, default=10.0, help="Clamp max SNR for weighted loss (higher reweights easy steps less)")
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     parser.add_argument("--disable_mlflow", action="store_true", help="Disable MLflow logging and system metrics")
     return parser.parse_args()
@@ -182,7 +183,7 @@ if __name__ == "__main__":
 
     # *Set up optimizer, loss function, and learning rate scheduler
     optimizer = torch.optim.Adam(model.parameters(),
-                                lr=5e-5,
+                                lr=1e-4, # 1e-4 or 5e-5
                                 weight_decay=0.01,
                                 betas=(0.9, 0.999))
     loss_fn = nn.MSELoss()
@@ -254,7 +255,7 @@ if __name__ == "__main__":
     # *Configurate the noise scheduler
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=max_timesteps,
-        beta_schedule="scaled_linear",
+        beta_schedule="squaredcos_cap_v2", # scaled_linear | squaredcos_cap_v2
         beta_start=0.0001,
         beta_end=0.02,
         clip_sample=True
@@ -359,11 +360,13 @@ if __name__ == "__main__":
                 # Initialize per-epoch optional metrics to ensure defined before checks
                 epoch_is_score = None
                 epoch_fid_score = None
+                running_avg_loss = None
                 # train_epoch should already average over dataloader; if not, divide by len(train_dataloader)
                 epoch_loss = train_epoch(
                     model, train_dataloader, noise_scheduler, optimizer,
-                    loss_fn, device, ema=ema, mixed_precision=True, use_weighted_snr=True,
-                    alphas_cumprod=alphas_cumprod
+                    loss_fn, device, ema=ema, mixed_precision=True, use_weighted_snr=args.use_weighted_snr,
+                    alphas_cumprod=alphas_cumprod,
+                    min_snr_gamma=args.min_snr_gamma
                 )
 
                 # * Validation step
@@ -523,7 +526,7 @@ if __name__ == "__main__":
                 # * ------------------ Save model checkpoints ------------------ *
                 if (current_epoch) % args.val_every == 0: 
                     # Save when the EMA running avg improves over previous best
-                    if running_avg_loss < prev_best_running:
+                    if (running_avg_loss is not None) and (running_avg_loss < prev_best_running):
                         print("Running average validation loss improved. Saving checkpoint...")
                         best_model_path = f"{save_dir}/best_model.pth"
                         best_loss = running_avg_loss
@@ -594,14 +597,14 @@ if __name__ == "__main__":
         torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
 
         # Also save a separate file with EMA weights applied to the model (for easy inference)
-        ema_save_path = f"{save_dir}/{model_name}_EMA{'_test' if Dataset == 'mnist' else ''}.pth"
+        ema_save_path = f"{save_dir}/{model_name}_EMA.pth"
         ema.apply_shadow(model)
-        # save checkpoint with ema.state_dict()
         save_with_retry(
             ema_save_path,
             {
                 "model_state_dict": model.state_dict(),
-                "batch_size": batch_size
+                "batch_size": batch_size,
+                "version": 1,
             }
         )
         ema.restore(model)

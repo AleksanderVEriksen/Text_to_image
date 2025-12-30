@@ -77,15 +77,15 @@ def save_config(config_dict, path):
     with open(path, "w") as f:
         json.dump(config_dict, f, indent=2)
 
-def load_model_weights(model, model_name, batch_size, device, use_checkpoint=False, use_ema=False, strict=True):
+def load_model_weights(model, model_name, dataset, batch_size, device, use_checkpoint=False, use_ema=False, strict=True):
     """Load model weights from possible candidate paths (EMA / checkpoint / base)."""
     import os, torch
     candidates = []
     if use_ema:
-        candidates.append(f"models/{batch_size}/{model_name}_EMA_test.pth")
+        candidates.append(f"models/{dataset}/{batch_size}/{model_name}_EMA_test.pth")
     if use_checkpoint:
-        candidates.append(f"models/checkpoints/{batch_size}/{model_name}.pth")
-    candidates.append(f"models/{batch_size}/{model_name}.pth")
+        candidates.append(f"models/{dataset}/checkpoints/{batch_size}/{model_name}.pth")
+    candidates.append(f"models/{dataset}/{batch_size}/{model_name}.pth")
     for p in candidates:
         if not os.path.isfile(p):
             continue
@@ -211,6 +211,7 @@ def sample_images(
                 eps = eps_uncond + guidance_scale * (eps_cond - eps_uncond)
             else:
                 eps = model(x, t_batch, labels=labels)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             step_out = scheduler.step(eps, t, x)
             x = step_out.prev_sample
             if return_intermediates:
@@ -289,7 +290,7 @@ def compute_snr(alphas_cumprod, timesteps):
     a = alphas_cumprod[timesteps]
     return a / (1 - a)
 
-def weighted_noise_loss(eps_pred, eps_target, alphas_cumprod, timesteps, min_snr_gamma=5.0):
+def weighted_noise_loss(eps_pred, eps_target, alphas_cumprod, timesteps, min_snr_gamma=10.0): # 5.0 | 10.0 - 30.0
     """Apply SNR-based weighting to noise prediction MSE to balance timestep difficulty."""
     import torch
     snr = compute_snr(alphas_cumprod, timesteps)
@@ -452,7 +453,7 @@ def plot_fid(fids, fid_epochs, save_path="figures/fid_plot.png", save_json=True)
 def validate(model, epochs, val_dataloader, noise_scheduler, loss_fn, device,
             max_batches=None, calculate_fid_score=False, fid_epoch_calc=10,
             calculate_is_score=False, is_epoch_calc=10,
-            img_size=32, show_progress=True, fid_progress=True, fid_min_samples=512):
+            img_size=32, show_progress=True, fid_progress=True, fid_min_samples=2048): # 2048 - 8192
     """Validation loop computing average loss and optional FID with progress bars."""
     import torch
     model.eval()
