@@ -91,8 +91,9 @@ def parse_args():
     parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--top_k_models", type=int, default=3)
-    parser.add_argument("--fid_epoch_calc", type=int, default=20)
-    parser.add_argument("--is_epoch_calc", type=int, default=20, help="Epoch interval to compute Inception Score")
+    parser.add_argument("--fid_epoch_calc", type=int, default=50)
+    parser.add_argument("--is_epoch_calc", type=int, default=50, help="Epoch interval to compute Inception Score")
+    parser.add_argument("--fid_min_samples", type=int, default=2048, help="Minimum samples for FID calculation")
     parser.add_argument("--no_ema_validate", action="store_true", help="Disable EMA weights during validation")
     parser.add_argument("--use_weighted_snr", action="store_true", default=True, help="Use SNR-weighted loss during training")
     parser.add_argument("--min_snr_gamma", type=float, default=10.0, help="Clamp max SNR for weighted loss (higher reweights easy steps less)")
@@ -388,7 +389,8 @@ if __name__ == "__main__":
                             fid_epoch_calc=FID_EPOCH_CALC,
                             calculate_is_score=True,
                             is_epoch_calc=IS_EPOCH_CALC,
-                            img_size=img_size
+                            img_size=img_size,
+                            fid_min_samples=args.fid_min_samples,
                         )
                     finally:
                         if use_ema_val:
