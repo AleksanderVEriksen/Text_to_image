@@ -81,6 +81,13 @@ def parse_args():
     parser.add_argument("--max_timesteps", type=int, default=1000)
     parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "custom"])
     parser.add_argument("--model", type=str, default="UNET", choices=['UNET', 'Basic'])
+    parser.add_argument("--lr", type=float, default=5e-05, help="Learning rate")
+    parser.add_argument("--beta_schedule", type=str, default="squaredcos_cap_v2",
+                        choices=["squaredcos_cap_v2", "scaled_linear", "linear", "cosine"],
+                        help="DDPM beta schedule")
+    parser.add_argument("--run_name", type=str, default=None, help="Optional run name to isolate outputs")
+    parser.add_argument("--models_root", type=str, default="models", help="Root folder to store models/checkpoints")
+    parser.add_argument("--figure_root", type=str, default="figures", help="Root folder to store figures")
     parser.add_argument("--num_classes", type=int, default=10)
     parser.add_argument("--checkpoint", action="store_true")
     parser.add_argument("--model_name", type=str, default="model")
@@ -99,6 +106,7 @@ def parse_args():
     parser.add_argument("--min_snr_gamma", type=float, default=10.0, help="Clamp max SNR for weighted loss (higher reweights easy steps less)")
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     parser.add_argument("--disable_mlflow", action="store_true", help="Disable MLflow logging and system metrics")
+    parser.add_argument("--fid_model_name", type=str, default=None, help="Optional name for best FID model file")
     return parser.parse_args()
 # ----------------------------------------------
 if __name__ == "__main__":
@@ -114,6 +122,10 @@ if __name__ == "__main__":
     Augment = args.augment
     FID_EPOCH_CALC = args.fid_epoch_calc
     IS_EPOCH_CALC = args.is_epoch_calc
+    fid_model_name = args.fid_model_name
+    figure_root = args.figure_root
+    # Compose run-specific folder to avoid collisions (e.g., grid search)
+    run_folder = f"{args.batch_size}{('_' + args.run_name) if args.run_name else ''}"
     # * Initialize variables
     current_epoch = 0
     patience_counter = 0
@@ -130,7 +142,7 @@ if __name__ == "__main__":
     test_dataloader = None
 
     # *Add existing models in the directory to the top_models list
-    model_dir = f"./models/{args.dataset}/checkpoints/{args.batch_size}"
+    model_dir = f"{args.models_root}/{args.dataset}/checkpoints/{run_folder}"
     if os.path.exists(model_dir):
         for filename in os.listdir(model_dir):
             if filename.endswith(".pth"):
@@ -149,7 +161,7 @@ if __name__ == "__main__":
             print("Warning: --checkpoint set but no --model_name provided. Exiting.")
             sys.exit(1)
 
-        ckpt_path = f"models/{args.dataset}/checkpoints/{args.batch_size}/{args.model_name}.pth"
+        ckpt_path = f"{args.models_root}/{args.dataset}/checkpoints/{run_folder}/{args.model_name}.pth"
         if not os.path.exists(ckpt_path):
             print(f"Warning: Checkpoint file {ckpt_path} does not exist. Exiting.")
             sys.exit(1)
@@ -164,8 +176,8 @@ if __name__ == "__main__":
             current_epoch = 0
         
     else:
-            # Use batch_size folders within the models directory
-        batch_size_dir = f"./models/{args.dataset}/{args.batch_size}"
+            # Use batch_size (and optional run name) folders within the models directory
+        batch_size_dir = f"{args.models_root}/{args.dataset}/{run_folder}"
         if not os.path.exists(batch_size_dir):
             print(f"No models directory for batch_size {args.batch_size} found. Training from scratch.")
             os.makedirs(batch_size_dir, exist_ok=True)
@@ -173,7 +185,7 @@ if __name__ == "__main__":
 
 
     # *Load dataset from data.py
-    train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment)
+    train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment, verbose=True)
     
     
     # *Create the UNET model
@@ -184,7 +196,7 @@ if __name__ == "__main__":
 
     # *Set up optimizer, loss function, and learning rate scheduler
     optimizer = torch.optim.Adam(model.parameters(),
-                                lr=1e-4, # 1e-4 or 5e-5
+                                lr=args.lr,
                                 weight_decay=0.01,
                                 betas=(0.9, 0.999))
     loss_fn = nn.MSELoss()
@@ -200,7 +212,7 @@ if __name__ == "__main__":
     ema = ExponentialMovingAverage(model, decay=0.9999)
 
     if Checkpoint:
-        ckpt_file = os.path.join("models", "checkpoints", f"{args.batch_size}", f"{model_name}.pth")
+        ckpt_file = os.path.join(args.models_root, args.dataset, "checkpoints", run_folder, f"{args.model_name}.pth")
         ckpt = torch.load(ckpt_file, map_location=device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
@@ -210,7 +222,7 @@ if __name__ == "__main__":
         best_loss = ckpt.get("loss", best_loss)
     else:
         # if a pretrained stateless file is expected, map to device; skip if file missing
-        weights_file = os.path.join("models", f"{args.batch_size}", f"{model_name}{'_test' if Dataset == 'mnist' else ''}.pth")
+        weights_file = os.path.join(args.models_root, f"{args.batch_size}", f"{model_name}.pth")
         if os.path.exists(weights_file):
             try:
                 model.load_state_dict(torch.load(weights_file, map_location=device))
@@ -239,8 +251,8 @@ if __name__ == "__main__":
         preview_images = images[:num_preview].cpu()
         preview_labels = labels[:num_preview].cpu().tolist()
 
-        preview_save_path = f"figures/{args.dataset}/preview/sample_images_grid_{args.dataset}.png"
-        os.makedirs(f"figures/{args.dataset}/preview", exist_ok=True)
+        preview_save_path = f"{figure_root}/{args.dataset}/preview/sample_images_grid_{args.dataset}.png"
+        os.makedirs(f"{figure_root}/{args.dataset}/preview", exist_ok=True)
         try:
             torchvision.utils.save_image(
                 preview_images,
@@ -256,7 +268,7 @@ if __name__ == "__main__":
     # *Configurate the noise scheduler
     noise_scheduler = DDPMScheduler(
         num_train_timesteps=max_timesteps,
-        beta_schedule="squaredcos_cap_v2", # scaled_linear | squaredcos_cap_v2
+        beta_schedule=args.beta_schedule, # scaled_linear | squaredcos_cap_v2 | linear | cosine
         beta_start=0.0001,
         beta_end=0.02,
         clip_sample=True
@@ -264,9 +276,9 @@ if __name__ == "__main__":
 
     noise_scheduler.set_timesteps(max_timesteps)
 
-    check_save_dir = f"./models/{args.dataset}/checkpoints/{args.batch_size}"
+    check_save_dir = f"{args.models_root}/{args.dataset}/checkpoints/{run_folder}"
     os.makedirs(check_save_dir, exist_ok=True)
-    save_dir = f"./models/{args.dataset}/{args.batch_size}"
+    save_dir = f"{args.models_root}/{args.dataset}/{run_folder}"
     os.makedirs(save_dir, exist_ok=True)
 
     T = noise_scheduler.config.num_train_timesteps
@@ -300,7 +312,10 @@ if __name__ == "__main__":
         "embedding_dim": 512,
         "num_classes": args.num_classes,
         "max_timesteps": args.max_timesteps,
-    }, f"models/{args.dataset}/{args.batch_size}/config.json")
+        "lr": args.lr,
+        "beta_schedule": args.beta_schedule,
+        "run_name": args.run_name,
+    }, f"{args.models_root}/{args.dataset}/{args.batch_size}/config.json")
 
     train_epoch_losses = []  # per-epoch losses (for plotting)
 
@@ -423,7 +438,7 @@ if __name__ == "__main__":
                             # apply EMA weights for saving best FID
                             if ema is not None:
                                 ema.apply_shadow(model)
-                            best_fid_path = f"{save_dir}/best_fid_model.pth"
+                            best_fid_path = f"{save_dir}/{fid_model_name}" if fid_model_name else f"{save_dir}/best_fid_model_{current_epoch}.pth"
                             save_with_retry(
                                 best_fid_path,
                                 {
@@ -441,6 +456,12 @@ if __name__ == "__main__":
                                     'version': 1
                                 }
                             )
+                            # Remove any older checkpoints in the save directory that have a worse (higher) FID
+                            if os.path.exists(best_fid_path) and os.path.getsize(best_fid_path) > 0:
+                                for fid_model_name in os.listdir(save_dir):
+                                    fid_score = torch.load(os.path.join(save_dir, fid_model_name), map_location="cpu").get("best_fid", None)
+                                    if isinstance(fid_score, (int, float)) and fid_score > best_fid:
+                                        os.remove(os.path.join(save_dir, fid_model_name))
                             if ema is not None:
                                 # optional: restore original weights after save
                                 pass
@@ -475,8 +496,8 @@ if __name__ == "__main__":
                         else:
                             generated_images = generated_images.cpu()
                     # save grid
-                    os.makedirs(f"figures/{args.dataset}/samples/{args.batch_size}", exist_ok=True)
-                    sample_save_path = f"figures/{args.dataset}/samples/{args.batch_size}/digit_7_epoch_{current_epoch}.png"
+                    os.makedirs(f"{figure_root}/{args.dataset}/samples/{run_folder}", exist_ok=True)
+                    sample_save_path = f"{figure_root}/{args.dataset}/samples/{run_folder}/digit_7_epoch_{current_epoch}.png"
                     try:
                         torchvision.utils.save_image(
                             generated_images,
@@ -551,7 +572,7 @@ if __name__ == "__main__":
 
                 # *Save model checkpoint every N epochs
                 if (current_epoch) % args.save_every_epoch == 0:
-                    ckpt_path = os.path.join(check_save_dir, f"model{'_test' if Dataset == 'mnist' else ''}_{current_epoch}.pth")
+                    ckpt_path = os.path.join(check_save_dir, f"model_{current_epoch}.pth")
                     save_with_retry(
                         ckpt_path,
                         {
@@ -582,7 +603,7 @@ if __name__ == "__main__":
         if best_fid_path:
             print(f"Saved best FID model to {best_fid_path} (FID={best_fid:.4f})")
         # Sampling block (unconditional preview first):
-        os.makedirs(f"figures/{args.dataset}/samples/{args.batch_size}", exist_ok=True)
+        os.makedirs(f"{figure_root}/{args.dataset}/samples/{run_folder}", exist_ok=True)
         # Final unconditional preview using EMA weights
         ema.apply_shadow(model)
         try:
@@ -596,7 +617,7 @@ if __name__ == "__main__":
                 uncond_preview = result
         finally:
             ema.restore(model)
-        torchvision.utils.save_image(uncond_preview, f"figures/{args.dataset}/samples/{args.batch_size}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
+        torchvision.utils.save_image(uncond_preview, f"{figure_root}/{args.dataset}/samples/{run_folder}/uncond_epoch_{current_epoch}.png", nrow=4, normalize=True)
 
         # Also save a separate file with EMA weights applied to the model (for easy inference)
         ema_save_path = f"{save_dir}/{model_name}_EMA.pth"
@@ -619,9 +640,9 @@ if __name__ == "__main__":
             val_epoch_points,
             val_losses,
             running_avg_losses,
-            save_path=f"figures/{args.dataset}/loss_curves/{args.batch_size}/loss_plot.png"
+            save_path=f"{figure_root}/{args.dataset}/loss_curves/{run_folder}/loss_plot.png"
         )
-        plot_fid(fid_scores, fid_epochs, save_path=f"figures/{args.dataset}/fid/{args.batch_size}/fid_plot.png")
+        plot_fid(fid_scores, fid_epochs, save_path=f"{figure_root}/{args.dataset}/fid/{run_folder}/fid_plot.png")
         
     except (Exception, KeyboardInterrupt) as e:
         is_kb_interrupt = isinstance(e, KeyboardInterrupt)

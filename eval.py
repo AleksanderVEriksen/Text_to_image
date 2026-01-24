@@ -73,7 +73,7 @@ if EMA:
         model_name = args.model_name
 
 # Load dataset from data.py
-train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment)
+train_dataloader, val_dataloader, test_dataloader = load_data_from_dataset(Dataset, batch_size, Augment, verbose=False)
 
 # Create the UNET model
 in_ch = 1 if Dataset == "mnist" else 3

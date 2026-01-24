@@ -1,12 +1,12 @@
 {
   "version": 1,
   "dataset": "mnist",
-  "batch_size": 64,
+  "batch_size": 32,
   "model": "UNET",
   "embedding_dim": 512,
   "num_classes": 10,
   "max_timesteps": 1000,
   "lr": 5e-05,
   "beta_schedule": "scaled_linear",
-  "run_name": "scaled_linear_lr5e-05_bs64"
+  "run_name": "scaled_linear_lr5e-05_bs32"
 }

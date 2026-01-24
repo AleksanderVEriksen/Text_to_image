@@ -60,7 +60,7 @@ def parse_label_string(label_str, num_classes, num_samples, device):
     return torch.tensor(vals, dtype=torch.long, device=device)
 
 
-def load_model(model, batch_size, model_name, device):
+def load_model(model, dataset,batch_size, model_name, device):
     """Helper function to load model weights with proper error handling"""
     possible_paths = [
         f"models/{dataset}/{batch_size}/{model_name}.pth",
@@ -106,7 +106,7 @@ def main():
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    cfg = load_config(args.batch_size)
+    cfg = load_config(args.dataset, args.batch_size)
     if cfg:
         if "num_classes" in cfg and cfg["num_classes"] != args.num_classes:
             print(f"[warn] num_classes mismatch config={cfg['num_classes']} arg={args.num_classes}")
@@ -120,7 +120,7 @@ def main():
             UNET(in_channels=in_ch, num_classes=args.num_classes).to(device)
     ema = ExponentialMovingAverage(model, decay=0.9999)
     # Load model weights using the helper function
-    load_model(model, args.batch_size, args.model_name, device)
+    load_model(model, args.dataset, args.batch_size, args.model_name, device)
 
     noise_scheduler = DDPMScheduler(
     num_train_timesteps=max_timesteps,
@@ -142,8 +142,8 @@ def main():
                                                 img_size= img_size, 
                                                 device=device, 
                                                 n=args.num_samples, 
-                                                Test=(in_ch==1), labels=labels, 
-                                                num_classes=num_classes,
+                                                labels=labels, 
+                                                return_intermediates=False,
                                                 guidance_scale=args.guidance_scale
                                                 )
         ema.restore(model)
@@ -151,10 +151,11 @@ def main():
         samples = samples.cpu()
     else:
         raise TypeError('sample_images returned unexpected type')
-
+    os.makedirs(os.path.dirname(os.path.join(f"figures/{args.dataset}/generated/{args.batch_size}",args.out)), exist_ok=True)
+    gen_path = os.path.join(f"figures/{args.dataset}/generated/{args.batch_size}",args.out)
     torchvision.utils.save_image(
         samples, 
-        args.out, 
+        gen_path, 
         nrow=int(max(1, min(8, args.num_samples//2))), 
         normalize=True)
     print(f"Saved generated samples to {args.out}")

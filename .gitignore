@@ -6,3 +6,5 @@
 /mnist
 /data
 .env
+/grid_search_results/models/*
+/grid_search_results/figures/*

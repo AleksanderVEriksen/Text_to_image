@@ -631,10 +631,11 @@ def sample_to_tensor(sample):
         return transform(sample[0])
 # ==================== Load data from data.py ===============================
 
-def load_data_from_dataset(dataset_name: str, batch_size: int, Augment: bool):
+def load_data_from_dataset(dataset_name: str, batch_size: int, Augment: bool, verbose: bool = True):
         # *Load dataset from data.py
     if dataset_name == "custom":
-        print("Training on custom dataset")
+        if verbose:
+            print("Loading custom dataset")
 
         train = get_dataset(train=True)
         test = get_dataset(test=True)
@@ -652,7 +653,8 @@ def load_data_from_dataset(dataset_name: str, batch_size: int, Augment: bool):
     
     elif dataset_name == "mnist":
         # *Load example dataset for testing
-        print("\n---Training on MNIST dataset---")
+        if verbose:
+            print("\n---Loading MNIST dataset---")
         train_ = get_mnist_dataset(train=True, augment=Augment)
         test_ = get_mnist_dataset(train=False, augment=False)
 
