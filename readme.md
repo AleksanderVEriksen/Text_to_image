@@ -322,7 +322,6 @@ Alternatively, save finalized weights in [models/published](models/published) an
 |Test with added projections, and forced 32x32 image|
 |:--:|
 |![Generated images of 7 from text prompt](readme_image_folder/image-12.png "Reconstructed images of 7")|
-|:--:|
 
 |![Eval](readme_image_folder/image-14.png "Eval")|
 |:--:|
