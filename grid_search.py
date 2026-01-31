@@ -19,23 +19,23 @@ def parse_list(arg: str, cast_type=float):
 
 
 def run_training(dataset: str, model: str, batch_size: int, epochs: int,
-                 fid_epoch_calc: int, lr: float, beta_schedule: str, 
-                 run_name: str,
-                 models_root: Optional[str] = None,
-                 extra_args: Optional[List[str]] = None,
-                 python_exe: Optional[str] = None) -> int:
+                fid_epoch_calc: int, lr: float, beta_schedule: str, 
+                run_name: str,
+                models_root: Optional[str] = None,
+                extra_args: Optional[List[str]] = None,
+                python_exe: Optional[str] = None) -> int:
     cmd = [python_exe or sys.executable, TRAIN_SCRIPT,
-           "--dataset", dataset,
-           "--model", model,
-           "--batch_size", str(batch_size),
-           "--epochs", str(epochs),
-           "--lr", str(lr),
-           "--fid_epoch_calc", str(fid_epoch_calc),
-           "--beta_schedule", beta_schedule,
-           "--run_name", run_name,
+        "--dataset", dataset,
+        "--model", model,
+        "--batch_size", str(batch_size),
+        "--epochs", str(epochs),
+        "--lr", str(lr),
+        "--fid_epoch_calc", str(fid_epoch_calc),
+        "--beta_schedule", beta_schedule,
+        "--run_name", run_name,
            *( ["--models_root", models_root] if models_root else [] ),
-           "--disable_mlflow"
-           ]
+        "--disable_mlflow"
+        ]
     if extra_args:
         cmd.extend(extra_args)
     print("\n>>> Running:", " ".join(cmd))
