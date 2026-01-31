@@ -234,6 +234,7 @@ python generate_from_text.py --label 7 --model UNET --model_name best_model --ba
 - Shape mismatch (28 vs 16): Ensure MNIST resized to 32×32 or re-enable output interpolation.
 - FID always None: Reduce --fid_epoch_calc.
 - Weights not found: Check models/<batch_size>/ directory and model_name correctness.
+ - Weights not found: Use the fetch script below to download and place `.pth` files.
 - Guidance ineffective: Confirm label dropout active during training; ensure guidance_scale passed at generation.
 
 ## Tests
@@ -282,6 +283,27 @@ python generate_from_text.py --label 7 --model UNET --model_name best_model --ba
 
 |![Generated samples](readme_image_folder/image-11.png)|
 |:--:|
+
+## Model Weights
+
+This repository does not store `.pth` weight files in git history or Git LFS. Download them on demand.
+
+Download steps:
+
+- Add direct URLs to scripts/model_urls.json for the files you need (e.g., GitHub Releases or Hugging Face raw file links).
+- Run the downloader from repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/fetch_models.ps1
+# Re-download if files already exist
+powershell -ExecutionPolicy Bypass -File scripts/fetch_models.ps1 -Force
+```
+
+Notes:
+
+- `models/**/*.pth` is ignored by git to prevent accidental commits.
+- If using private hosting, ensure you have access to the download URLs.
+- CI can populate scripts/model_urls.json via secrets before running.
 
 ## Tests with added projections - 300 epochs
 

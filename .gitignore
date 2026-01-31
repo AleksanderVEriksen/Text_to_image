@@ -1,3 +1,4 @@
+models/**/*.pth
 /__pycache__
 /venv
 /figures/mnist/samples/*

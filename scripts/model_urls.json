@@ -1,0 +1,7 @@
+{
+  "models/mnist/64/best_fid_model.pth": "CHANGE_ME_TO_DIRECT_DOWNLOAD_URL",
+  "models/mnist/64/best_fid_model_450.pth": "CHANGE_ME_TO_DIRECT_DOWNLOAD_URL",
+  "models/mnist/64/best_fid_model_EMA.pth": "CHANGE_ME_TO_DIRECT_DOWNLOAD_URL",
+  "models/mnist/64/best_model.pth": "CHANGE_ME_TO_DIRECT_DOWNLOAD_URL",
+  "models/mnist/64/model_EMA_test.pth": "CHANGE_ME_TO_DIRECT_DOWNLOAD_URL"
+}
