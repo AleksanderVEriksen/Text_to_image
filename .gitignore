@@ -1,4 +1,5 @@
 models/**/*.pth
+!models/published/*.pth
 /__pycache__
 /venv
 /figures/mnist/samples/*

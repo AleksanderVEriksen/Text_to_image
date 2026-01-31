@@ -286,7 +286,7 @@ python generate_from_text.py --label 7 --model UNET --model_name best_model --ba
 
 ## Model Weights
 
-This repository does not store `.pth` weight files in git history or Git LFS. Download them on demand.
+This repository does not store `.pth` weight files in git history or Git LFS by default. Training outputs remain local and ignored. When you want to publish a finalized checkpoint, place it under `models/published/` and commit it.
 
 Download steps:
 
@@ -301,9 +301,21 @@ powershell -ExecutionPolicy Bypass -File scripts/fetch_models.ps1 -Force
 
 Notes:
 
-- `models/**/*.pth` is ignored by git to prevent accidental commits.
-- If using private hosting, ensure you have access to the download URLs.
-- CI can populate scripts/model_urls.json via secrets before running.
+- `models/**/*.pth` is ignored by git to prevent accidental commits; `models/published/*.pth` is whitelisted to allow intentional publishing.
+- If you prefer hosting weights externally, you can still use the downloader above.
+- CI can populate `scripts/model_urls.json` via secrets before running.
+
+### Publish finalized checkpoints
+
+To publish a specific weight file without using the published folder, you can force-add it:
+
+```powershell
+git add -f models/mnist/64/best_model.pth
+git commit -m "Publish finalized checkpoint: best_model.pth"
+git push
+```
+
+Alternatively, save finalized weights in [models/published](models/published) and commit normally.
 
 ## Tests with added projections - 300 epochs
 
