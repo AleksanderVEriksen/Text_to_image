@@ -8,6 +8,8 @@ import sys
 from typing import List, Optional, Tuple
 
 import torch
+import shutil
+import time
 
 # Workspace-local training script
 TRAIN_SCRIPT = os.path.join(os.path.dirname(__file__), "train.py")
@@ -43,11 +45,12 @@ def run_training(dataset: str, model: str, batch_size: int, epochs: int,
     return proc.returncode
 
 
-def find_best_fid(models_dir: str) -> Tuple[Optional[float], Optional[str]]:
+def find_best_fid(models_dir: str) -> Tuple[Optional[float], Optional[str], Optional[float]]:
     if not os.path.isdir(models_dir):
-        return None, None
+        return None, None, None
     best_val = None
     best_path = None
+    best_runtime = None
     for fname in os.listdir(models_dir):
         if not fname.endswith('.pth'):
             continue
@@ -57,10 +60,12 @@ def find_best_fid(models_dir: str) -> Tuple[Optional[float], Optional[str]]:
         except Exception:
             continue
         fid = ckpt.get('best_fid')
+        run_time = ckpt.get('run_time')
         if isinstance(fid, (int, float)):
             if best_val is None or fid < best_val:
                 best_val, best_path = float(fid), fpath
-    return best_val, best_path
+                best_runtime = float(run_time) if isinstance(run_time, (int, float)) else None
+    return best_val, best_path, best_runtime
 
 
 def discover_run_folders(models_root: str, dataset: str) -> List[str]:
@@ -108,6 +113,22 @@ def parse_run_metadata(run_folder: str) -> Tuple[Optional[int], Optional[float],
     return bs, lr, sched
 
 
+def _clean_dataset_folder(models_root: str, dataset: str) -> None:
+    target_dir = os.path.join(models_root, dataset)
+    if not os.path.isdir(target_dir):
+        return
+    print(f"Cleaning grid search dataset folder: {target_dir}")
+    for name in os.listdir(target_dir):
+        path = os.path.join(target_dir, name)
+        try:
+            if os.path.isdir(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.remove(path)
+        except Exception as e:
+            print(f"Failed to remove {path}: {e}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Grid search for diffusion hyperparams")
     parser.add_argument("--dataset", default="mnist", choices=["mnist", "custom"])
@@ -123,6 +144,9 @@ def main():
     parser.add_argument("--models_root", type=str, default="grid_search_results/models", help="Root directory to store and scan models")
     parser.add_argument("--scan_only", action="store_true", help="Only scan existing runs; do not train")
     parser.add_argument("--auto_discover", action="store_true", help="Scan all run folders under models_root/dataset")
+    parser.add_argument("--clean_grid_search", action="store_true", help="Delete contents of models_root/<dataset> before running")
+    parser.add_argument("--efficiency_metric", type=str, default="fid_per_sec", choices=["fid_per_sec", "weighted"], help="Efficiency metric: fid_per_sec (lower is better) or weighted normalized blend")
+    parser.add_argument("--efficiency_weight", type=float, default=0.6, help="Weight for FID in weighted efficiency (0-1); time weight is 1-w")
     args = parser.parse_args()
 
     batch_sizes = parse_list(args.batch_sizes, int)
@@ -130,6 +154,11 @@ def main():
     schedules = [s.strip() for s in args.schedules.split(',') if s.strip()]
 
     results = []
+
+    # Optional cleanup of dataset folder under models_root
+    if args.clean_grid_search:
+        os.makedirs(args.models_root, exist_ok=True)
+        _clean_dataset_folder(args.models_root, args.dataset)
     
     # In auto-discover mode, ignore provided grids and scan all run folders
     discovered = []
@@ -158,6 +187,12 @@ def main():
         # Use a single models_root for both training and scanning
         models_root = args.models_root
         os.makedirs(models_root, exist_ok=True)
+        # When models_root ends with 'models', route figures to its parent (e.g., 'grid_search_results')
+        base_root = os.path.normpath(models_root)
+        if os.path.basename(base_root) == "models":
+            figure_root = os.path.dirname(base_root)
+            if figure_root:
+                extra.extend(["--figure_root", figure_root])
         if not args.scan_only:
             rc = run_training(
                 args.dataset, args.model, bs, args.epochs, args.fid_epoch_calc, lr, sched, run_name,
@@ -167,7 +202,10 @@ def main():
                 print(f"Run failed (exit {rc}) for {run_name}")
         # After run (or in scan-only), inspect model directory for best FID
         models_dir = os.path.join(models_root, args.dataset, run_folder)
-        best_fid, best_path = find_best_fid(models_dir)
+        best_fid, best_path, runtime_ckpt = find_best_fid(models_dir)
+        # Efficiency based on checkpoint runtime (preferred). If missing, remains None in scan-only mode.
+        runtime_val = runtime_ckpt
+        eff_fid_per_sec = (best_fid / max(runtime_val, 1e-6)) if (best_fid is not None and runtime_val is not None) else None
         results.append({
             "batch_size": bs,
             "lr": lr,
@@ -176,6 +214,8 @@ def main():
             "models_dir": models_dir,
             "best_fid": best_fid,
             "best_fid_path": best_path,
+            "runtime_seconds": runtime_val,
+            "efficiency_fid_per_sec": eff_fid_per_sec,
         })
         print(f"Result: schedule={sched}, lr={lr}, bs={bs} -> best_fid={best_fid} ({best_path})")
 
@@ -183,6 +223,25 @@ def main():
     results.sort(key=lambda r: (float('inf') if r['best_fid'] is None else r['best_fid']))
     os.makedirs("grid_search_results", exist_ok=True)
     out_json = os.path.join("grid_search_results", "results.json")
+    # Compute weighted normalized efficiency if requested
+    if args.efficiency_metric == "weighted":
+        # Collect ranges
+        fid_vals = [r["best_fid"] for r in results if r["best_fid"] is not None]
+        time_vals = [r["runtime_seconds"] for r in results if r["runtime_seconds"] is not None]
+        fid_min, fid_max = (min(fid_vals), max(fid_vals)) if fid_vals else (None, None)
+        time_min, time_max = (min(time_vals), max(time_vals)) if time_vals else (None, None)
+        def norm(val, vmin, vmax):
+            if val is None or vmin is None or vmax is None or vmax == vmin:
+                return None
+            return (val - vmin) / (vmax - vmin)
+        w = max(0.0, min(1.0, args.efficiency_weight))
+        for r in results:
+            fid_n = norm(r["best_fid"], fid_min, fid_max)
+            time_n = norm(r["runtime_seconds"], time_min, time_max)
+            if fid_n is not None and time_n is not None:
+                r["efficiency_weighted"] = w * fid_n + (1.0 - w) * time_n
+            else:
+                r["efficiency_weighted"] = None
     with open(out_json, "w") as f:
         json.dump(results, f, indent=2)
     print(f"Saved results to {out_json}")
@@ -191,6 +250,24 @@ def main():
         print("\nBest configuration:")
         print(f" schedule={best['schedule']} lr={best['lr']} bs={best['batch_size']}")
         print(f" best_fid={best['best_fid']} at {best['best_fid_path']}")
+
+    # Also print best by efficiency when available
+    if any(r.get("efficiency_fid_per_sec") is not None for r in results):
+        best_eff = sorted(
+            [r for r in results if r.get("efficiency_fid_per_sec") is not None],
+            key=lambda r: r["efficiency_fid_per_sec"]
+        )[0]
+        print("\nBest by FID/sec (lower is better):")
+        print(f" schedule={best_eff['schedule']} lr={best_eff['lr']} bs={best_eff['batch_size']} time={best_eff['runtime_seconds']:.2f}s")
+        print(f" fid={best_eff['best_fid']} efficiency={best_eff['efficiency_fid_per_sec']:.4f}")
+    if any(r.get("efficiency_weighted") is not None for r in results):
+        best_w = sorted(
+            [r for r in results if r.get("efficiency_weighted") is not None],
+            key=lambda r: r["efficiency_weighted"]
+        )[0]
+        print("\nBest by weighted efficiency (lower is better):")
+        print(f" schedule={best_w['schedule']} lr={best_w['lr']} bs={best_w['batch_size']} time={best_w['runtime_seconds']:.2f}s")
+        print(f" fid={best_w['best_fid']} efficiency={best_w['efficiency_weighted']:.4f} (w={args.efficiency_weight})")
 
 
 if __name__ == "__main__":

@@ -76,7 +76,7 @@ warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_s
 # *Parse command line arguments
 def parse_args():
     parser = argparse.ArgumentParser(description="Train UNET on MNIST or custom dataset")
-    parser.add_argument("--batch_size", type=int, default=32)
+    parser.add_argument("--batch_size", type=int, default=16)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--max_timesteps", type=int, default=1000)
     parser.add_argument("--dataset", type=str, default="mnist", choices=["mnist", "custom"])
@@ -428,8 +428,12 @@ if __name__ == "__main__":
                     val_losses.append(val_loss)
                     running_avg_losses.append(running_avg_loss)
                     val_epoch_points.append(current_epoch)
+                    
+                    # *Calculate runtime for this epoch
+                    end_time = time.time()
+                    run_time = end_time - start_time
 
-
+                    # *Early stopping based on FID score
                     if epoch_fid_score is not None:
                         fid_scores.append(epoch_fid_score)
                         fid_epochs.append(current_epoch)
@@ -455,6 +459,7 @@ if __name__ == "__main__":
                                     'scaler_state_dict': scaler.state_dict(),
                                     'ema_state': ema.state_dict() if ema is not None else None,
                                     'batch_size': batch_size,
+                                    'run_time': run_time,
                                     'version': 1
                                 }
                             )
@@ -480,7 +485,7 @@ if __name__ == "__main__":
                             if ema is not None:
                                 # optional: restore original weights after save
                                 pass
-                            print(f"Saved best FID model to {best_fid_path} (FID={epoch_fid_score:.4f})")
+                            print(f"Saved best FID model to {best_fid_path} (FID={epoch_fid_score:.4f}, Time={run_time:.2f}s)")
                         else:
                             patience_counter += 1
                         if patience_counter > args.patience:
@@ -560,7 +565,8 @@ if __name__ == "__main__":
                         print(f"Inception Score: {epoch_is_score:.4f}")
                 
                 end_time = time.time()
-                print(f"Time: {end_time - start_time:.2f} seconds")
+                run_time = end_time - start_time
+                print(f"Time: {run_time:.2f} seconds")
 
                 print("-" * 50)
                 
@@ -585,6 +591,7 @@ if __name__ == "__main__":
                                 'running_avg_losses': running_avg_losses,
                                 'ema_state': ema.state_dict(),
                                 'batch_size': batch_size,
+                                'run_time': run_time
                             }
                         )
 
@@ -601,6 +608,7 @@ if __name__ == "__main__":
                             "ema_state": ema.state_dict(),
                             "loss": running_avg_loss,
                             "version": 1,
+                            "run_time": run_time
                         }
                     )
 
@@ -646,6 +654,7 @@ if __name__ == "__main__":
                 "model_state_dict": model.state_dict(),
                 "batch_size": batch_size,
                 "version": 1,
+                "run_time": run_time
             }
         )
         ema.restore(model)

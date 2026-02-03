@@ -1,191 +1,29 @@
 [
   {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "32_squaredcos_cap_v2_lr5e-05_bs32",
-    "models_dir": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32",
-    "best_fid": 114.59880587587531,
-    "best_fid_path": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "32_squaredcos_cap_v2_lr0.0001_bs32",
-    "models_dir": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr0.0001_bs32",
-    "best_fid": 116.7776709685287,
-    "best_fid_path": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr0.0001_bs32\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "32_scaled_linear_lr0.0001_bs32",
-    "models_dir": "grid_search_results/models\\mnist\\32_scaled_linear_lr0.0001_bs32",
-    "best_fid": 127.30195752217188,
-    "best_fid_path": "grid_search_results/models\\mnist\\32_scaled_linear_lr0.0001_bs32\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "32_scaled_linear_lr5e-05_bs32",
-    "models_dir": "grid_search_results/models\\mnist\\32_scaled_linear_lr5e-05_bs32",
-    "best_fid": 134.4078062517585,
-    "best_fid_path": "grid_search_results/models\\mnist\\32_scaled_linear_lr5e-05_bs32\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "64_squaredcos_cap_v2_lr0.0001_bs64",
-    "models_dir": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr0.0001_bs64",
-    "best_fid": 165.70324367158818,
-    "best_fid_path": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr0.0001_bs64\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "8_squaredcos_cap_v2_lr5e-05_bs8",
-    "models_dir": "grid_search_results/models\\mnist\\8_squaredcos_cap_v2_lr5e-05_bs8",
-    "best_fid": 176.14513872516991,
-    "best_fid_path": "grid_search_results/models\\mnist\\8_squaredcos_cap_v2_lr5e-05_bs8\\best_fid_model_6.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "64_squaredcos_cap_v2_lr5e-05_bs64",
-    "models_dir": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64",
-    "best_fid": 179.80400280622067,
-    "best_fid_path": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "64_scaled_linear_lr0.0001_bs64",
-    "models_dir": "grid_search_results/models\\mnist\\64_scaled_linear_lr0.0001_bs64",
-    "best_fid": 187.88286778314034,
-    "best_fid_path": "grid_search_results/models\\mnist\\64_scaled_linear_lr0.0001_bs64\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "64_scaled_linear_lr5e-05_bs64",
-    "models_dir": "grid_search_results/models\\mnist\\64_scaled_linear_lr5e-05_bs64",
-    "best_fid": 212.73628300955173,
-    "best_fid_path": "grid_search_results/models\\mnist\\64_scaled_linear_lr5e-05_bs64\\best_fid_model_50.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "16_scaled_linear_lr5e-05_bs16",
-    "models_dir": "grid_search_results/models\\mnist\\16_scaled_linear_lr5e-05_bs16",
-    "best_fid": 213.9342516873112,
-    "best_fid_path": "grid_search_results/models\\mnist\\16_scaled_linear_lr5e-05_bs16\\best_fid_model_3.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "8_scaled_linear_lr5e-05_bs8",
-    "models_dir": "grid_search_results/models\\mnist\\8_scaled_linear_lr5e-05_bs8",
-    "best_fid": 226.94421657650784,
-    "best_fid_path": "grid_search_results/models\\mnist\\8_scaled_linear_lr5e-05_bs8\\best_fid_model_6.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "16_scaled_linear_lr0.0001_bs16",
-    "models_dir": "grid_search_results/models\\mnist\\16_scaled_linear_lr0.0001_bs16",
-    "best_fid": 240.6362255159633,
-    "best_fid_path": "grid_search_results/models\\mnist\\16_scaled_linear_lr0.0001_bs16\\best_fid_model_3.pth"
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "16_squaredcos_cap_v2_lr5e-05_bs16",
+    "batch_size": 16,
+    "lr": 5e-05,
+    "schedule": "squaredcos_cap_v2",
+    "run_name": "squaredcos_cap_v2_lr5e-05_bs16",
     "models_dir": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16",
-    "best_fid": 283.04513483872427,
-    "best_fid_path": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16\\best_fid_model_3.pth"
+    "best_fid": 105.70138218580539,
+    "best_fid_path": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16\\best_fid_model_10.pth"
   },
   {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "16",
-    "models_dir": "grid_search_results/models\\mnist\\16",
-    "best_fid": null,
-    "best_fid_path": null
+    "batch_size": 32,
+    "lr": 5e-05,
+    "schedule": "squaredcos_cap_v2",
+    "run_name": "squaredcos_cap_v2_lr5e-05_bs32",
+    "models_dir": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32",
+    "best_fid": 168.9235596582322,
+    "best_fid_path": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32\\best_fid_model_10.pth"
   },
   {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "16_squaredcos_cap_v2_lr0.0001_bs16",
-    "models_dir": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr0.0001_bs16",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "32",
-    "models_dir": "grid_search_results/models\\mnist\\32",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "64",
-    "models_dir": "grid_search_results/models\\mnist\\64",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "8",
-    "models_dir": "grid_search_results/models\\mnist\\8",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "8_scaled_linear_lr0.0001_bs8",
-    "models_dir": "grid_search_results/models\\mnist\\8_scaled_linear_lr0.0001_bs8",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "8_squaredcos_cap_v2_lr0.0001_bs8",
-    "models_dir": "grid_search_results/models\\mnist\\8_squaredcos_cap_v2_lr0.0001_bs8",
-    "best_fid": null,
-    "best_fid_path": null
-  },
-  {
-    "batch_size": null,
-    "lr": null,
-    "schedule": null,
-    "run_name": "checkpoints",
-    "models_dir": "grid_search_results/models\\mnist\\checkpoints",
-    "best_fid": null,
-    "best_fid_path": null
+    "batch_size": 64,
+    "lr": 5e-05,
+    "schedule": "squaredcos_cap_v2",
+    "run_name": "squaredcos_cap_v2_lr5e-05_bs64",
+    "models_dir": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64",
+    "best_fid": 260.51105618839256,
+    "best_fid_path": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64\\best_fid_model_10.pth"
   }
 ]
