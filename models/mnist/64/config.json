@@ -1,12 +1,3 @@
-{
-  "version": 1,
-  "dataset": "mnist",
-  "batch_size": 64,
-  "model": "UNET",
-  "embedding_dim": 512,
-  "num_classes": 10,
-  "max_timesteps": 1000,
-  "lr": 5e-05,
-  "beta_schedule": "scaled_linear",
-  "run_name": "scaled_linear_lr5e-05_bs64"
-}
+version https://git-lfs.github.com/spec/v1
+oid sha256:391de19a8c0bf53128487958c14a976de02444eaeafc66c5c722731236de7d33
+size 244

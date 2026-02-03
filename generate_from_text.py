@@ -1,7 +1,7 @@
 import argparse
 import torch
 import torchvision
-from diffusers import DDPMScheduler
+from diffusers import DDPMScheduler # type: ignore
 import ema
 from model import UNET, BasicUNet
 from utils import sample_images

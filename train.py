@@ -97,9 +97,9 @@ def parse_args():
     parser.add_argument("--save_every_epoch", type=int, default=10)
     parser.add_argument("--augment", action="store_true", default=False)
     parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--top_k_models", type=int, default=3)
-    parser.add_argument("--fid_epoch_calc", type=int, default=50)
-    parser.add_argument("--is_epoch_calc", type=int, default=50, help="Epoch interval to compute Inception Score")
+    parser.add_argument("--top_k_models", type=int, default=2)
+    parser.add_argument("--fid_epoch_calc", type=int, default=10)
+    parser.add_argument("--is_epoch_calc", type=int, default=10, help="Epoch interval to compute Inception Score")
     parser.add_argument("--fid_min_samples", type=int, default=2048, help="Minimum samples for FID calculation")
     parser.add_argument("--no_ema_validate", action="store_true", help="Disable EMA weights during validation")
     parser.add_argument("--use_weighted_snr", action="store_true", default=True, help="Use SNR-weighted loss during training")
@@ -107,6 +107,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42)  # added (used by set_global_seed)
     parser.add_argument("--disable_mlflow", action="store_true", help="Disable MLflow logging and system metrics")
     parser.add_argument("--fid_model_name", type=str, default=None, help="Optional name for best FID model file")
+    parser.add_argument("--label_to_sample", type=int, default=None, help="Specific label to sample during training (for conditional datasets)")
     return parser.parse_args()
 # ----------------------------------------------
 if __name__ == "__main__":
@@ -123,6 +124,7 @@ if __name__ == "__main__":
     FID_EPOCH_CALC = args.fid_epoch_calc
     IS_EPOCH_CALC = args.is_epoch_calc
     fid_model_name = args.fid_model_name
+    label_to_sample = args.label_to_sample
     figure_root = args.figure_root
     # Compose run-specific folder to avoid collisions (e.g., grid search)
     run_folder = f"{args.batch_size}{('_' + args.run_name) if args.run_name else ''}"
@@ -148,7 +150,7 @@ if __name__ == "__main__":
             if filename.endswith(".pth"):
                 path = os.path.join(model_dir, filename)
                 try:
-                    ckpt = torch.load(path, map_location=device)
+                    ckpt = torch.load(path, map_location=device, weights_only=False)
                     loss = ckpt.get("loss", None)
                     if loss is not None:
                         top_models.append((loss, path))
@@ -213,7 +215,7 @@ if __name__ == "__main__":
 
     if Checkpoint:
         ckpt_file = os.path.join(args.models_root, args.dataset, "checkpoints", run_folder, f"{args.model_name}.pth")
-        ckpt = torch.load(ckpt_file, map_location=device)
+        ckpt = torch.load(ckpt_file, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt.get("optimizer_state_dict", {}))
         scaler.load_state_dict(ckpt.get("scaler_state_dict", {}))
@@ -225,7 +227,7 @@ if __name__ == "__main__":
         weights_file = os.path.join(args.models_root, f"{args.batch_size}", f"{model_name}.pth")
         if os.path.exists(weights_file):
             try:
-                model.load_state_dict(torch.load(weights_file, map_location=device))
+                model.load_state_dict(torch.load(weights_file, map_location=device, weights_only=False))
             except Exception:
                 # ignore if shape mismatch or not a state_dict
                 pass
@@ -459,9 +461,22 @@ if __name__ == "__main__":
                             # Remove any older checkpoints in the save directory that have a worse (higher) FID
                             if os.path.exists(best_fid_path) and os.path.getsize(best_fid_path) > 0:
                                 for fid_model_name in os.listdir(save_dir):
-                                    fid_score = torch.load(os.path.join(save_dir, fid_model_name), map_location="cpu").get("best_fid", None)
+                                    # Only consider PyTorch checkpoint files
+                                    if not fid_model_name.endswith(".pth"):
+                                        continue
+                                    ckpt_path = os.path.join(save_dir, fid_model_name)
+                                    try:
+                                        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+                                    except Exception:
+                                        # Skip files that are not valid pickled checkpoints
+                                        continue
+                                    fid_score = ckpt.get("best_fid", None)
                                     if isinstance(fid_score, (int, float)) and fid_score > best_fid:
-                                        os.remove(os.path.join(save_dir, fid_model_name))
+                                        try:
+                                            os.remove(ckpt_path)
+                                        except Exception:
+                                            # Ignore deletion errors
+                                            pass
                             if ema is not None:
                                 # optional: restore original weights after save
                                 pass
@@ -479,7 +494,8 @@ if __name__ == "__main__":
                         model.eval()
                         # Test reconstruction of specific digits
                         n_images = 16
-                        test_labels = torch.full((n_images,), 7, device=device)  # Test multiple 7s
+                        label = args.label_to_sample if hasattr(args, "label_to_sample") else 7
+                        test_labels = torch.full((n_images,), label, device=device)  # Test multiple 7s
                         ema.apply_shadow(model)
                         generated_images = sample_images(
                             model, 
@@ -497,7 +513,7 @@ if __name__ == "__main__":
                             generated_images = generated_images.cpu()
                     # save grid
                     os.makedirs(f"{figure_root}/{args.dataset}/samples/{run_folder}", exist_ok=True)
-                    sample_save_path = f"{figure_root}/{args.dataset}/samples/{run_folder}/digit_7_epoch_{current_epoch}.png"
+                    sample_save_path = f"{figure_root}/{args.dataset}/samples/{run_folder}/digit_{label}_epoch_{current_epoch}.png"
                     try:
                         torchvision.utils.save_image(
                             generated_images,
@@ -507,6 +523,8 @@ if __name__ == "__main__":
                         )
                     except Exception as e:
                         print(f"Failed to save generated samples grid: {e}")
+                    finally:
+                        print(f"Saved generated samples to {sample_save_path}")
         # -------------------------------------------------------------
                 # * ------------------ Compute and log metrics ------------------ *
                 

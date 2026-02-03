@@ -53,7 +53,7 @@ def find_best_fid(models_dir: str) -> Tuple[Optional[float], Optional[str]]:
             continue
         fpath = os.path.join(models_dir, fname)
         try:
-            ckpt = torch.load(fpath, map_location='cpu')
+            ckpt = torch.load(fpath, map_location='cpu', weights_only=False)
         except Exception:
             continue
         fid = ckpt.get('best_fid')
@@ -61,6 +61,51 @@ def find_best_fid(models_dir: str) -> Tuple[Optional[float], Optional[str]]:
             if best_val is None or fid < best_val:
                 best_val, best_path = float(fid), fpath
     return best_val, best_path
+
+
+def discover_run_folders(models_root: str, dataset: str) -> List[str]:
+    base = os.path.join(models_root, dataset)
+    if not os.path.isdir(base):
+        return []
+    return [d for d in os.listdir(base) if os.path.isdir(os.path.join(base, d))]
+
+
+def parse_run_metadata(run_folder: str) -> Tuple[Optional[int], Optional[float], Optional[str]]:
+    # Expected format: "<bs>_<schedule>_lr<lr>_bs<bs>"
+    m = re.match(r"^(?P<bs>\d+)_?(?P<sched>[^_]+)?_lr(?P<lr>[^_]+)_bs(?P<bs2>\d+)$", run_folder)
+    if not m:
+        # Try simpler pattern: "<bs>_<rest>" then parse rest
+        m2 = re.match(r"^(?P<bs>\d+)_(?P<rest>.+)$", run_folder)
+        if m2:
+            bs = int(m2.group("bs"))
+            rest = m2.group("rest")
+            m3 = re.match(r"^(?P<sched>[^_]+)_lr(?P<lr>[^_]+)_bs(?P<bs2>\d+)$", rest)
+            if m3:
+                bs2 = int(m3.group("bs2"))
+                sched = m3.group("sched")
+                try:
+                    lr = float(m3.group("lr"))
+                except ValueError:
+                    lr = None
+                return (bs if bs == bs2 else bs2, lr, sched)
+        return None, None, None
+    try:
+        bs = int(m.group("bs"))
+    except Exception:
+        bs = None
+    try:
+        lr = float(m.group("lr"))
+    except Exception:
+        lr = None
+    sched = m.group("sched")
+    bs2 = m.group("bs2")
+    try:
+        bs2 = int(bs2)
+    except Exception:
+        bs2 = None
+    if bs is not None and bs2 is not None and bs != bs2:
+        bs = bs2
+    return bs, lr, sched
 
 
 def main():
@@ -77,6 +122,7 @@ def main():
     parser.add_argument("--python", type=str, default=None, help="path to python interpreter")
     parser.add_argument("--models_root", type=str, default="grid_search_results/models", help="Root directory to store and scan models")
     parser.add_argument("--scan_only", action="store_true", help="Only scan existing runs; do not train")
+    parser.add_argument("--auto_discover", action="store_true", help="Scan all run folders under models_root/dataset")
     args = parser.parse_args()
 
     batch_sizes = parse_list(args.batch_sizes, int)
@@ -85,9 +131,24 @@ def main():
 
     results = []
     
-    for bs, lr, sched in itertools.product(batch_sizes, lrs, schedules):
-        run_name = f"{sched}_lr{lr}_bs{bs}"
-        run_folder = f"{bs}_{run_name}"
+    # In auto-discover mode, ignore provided grids and scan all run folders
+    discovered = []
+    if args.scan_only and args.auto_discover:
+        discovered = discover_run_folders(args.models_root, args.dataset)
+
+    combos = []
+    if discovered:
+        for run_folder in discovered:
+            bs, lr, sched = parse_run_metadata(run_folder)
+            combos.append((bs, lr, sched, run_folder))
+    else:
+        for bs, lr, sched in itertools.product(batch_sizes, lrs, schedules):
+            run_name = f"{sched}_lr{lr}_bs{bs}"
+            run_folder = f"{bs}_{run_name}"
+            combos.append((bs, lr, sched, run_folder))
+
+    for bs, lr, sched, run_folder in combos:
+        run_name = f"{sched}_lr{lr}_bs{bs}" if (sched is not None and lr is not None and bs is not None) else run_folder
         # pass optional extra args
         extra = []
         if args.augment:
