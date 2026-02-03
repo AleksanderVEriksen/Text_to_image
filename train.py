@@ -494,8 +494,8 @@ if __name__ == "__main__":
                         model.eval()
                         # Test reconstruction of specific digits
                         n_images = 16
-                        label = args.label_to_sample if hasattr(args, "label_to_sample") else 7
-                        test_labels = torch.full((n_images,), label, device=device)  # Test multiple 7s
+                        label = args.label_to_sample if (hasattr(args, "label_to_sample") and args.label_to_sample is not None) else 7
+                        test_labels = torch.full((n_images,), label, device=device)  # Test multiple of the same label
                         ema.apply_shadow(model)
                         generated_images = sample_images(
                             model, 

@@ -10,3 +10,5 @@ models/**/*.pth
 .env
 /grid_search_results/models/*
 /grid_search_results/figures/*
+models/**/*.json
+!models/published/*.json
