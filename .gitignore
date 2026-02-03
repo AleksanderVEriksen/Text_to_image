@@ -12,3 +12,4 @@ models/**/*.pth
 /grid_search_results/figures/*
 models/**/*.json
 !models/published/*.json
+!models/mnist/**/config.json

@@ -1,5 +1,5 @@
 # Git LFS tracking for published artifacts
 models/published/*.pth filter=lfs diff=lfs merge=lfs -text
 models/published/*.json filter=lfs diff=lfs merge=lfs -text
-*.png !text !filter !merge !diff
 models/mnist/**/config.json filter=lfs diff=lfs merge=lfs -text
+*.png !text !filter !merge !diff
