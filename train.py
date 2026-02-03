@@ -237,34 +237,37 @@ if __name__ == "__main__":
     if train_dataloader is None or val_dataloader is None or test_dataloader is None:
         raise RuntimeError("Dataloaders were not initialized; check dataset selection.")
 
-    # *Show 10 samples in a grid for preview purposes
+    # *Show 10 samples in a grid for preview purposes if empty
     # show a sample batch shape (collate_fn returns (images, labels))
-    sample = next(iter(train_dataloader))
-    if isinstance(sample, (tuple, list)):
-        images, labels = sample
-        print(f"\nInput sample shape: {tuple(images.shape)}")
-        print(f"Labels shape: {tuple(labels.shape)}\n")
-    else:
-        images = sample
-        print(f"\nInput sample shape: {tuple(images.shape)}\n")
-    
-    if isinstance(sample, (tuple, list)):
-        num_preview = min(10, images.shape[0])
-        preview_images = images[:num_preview].cpu()
-        preview_labels = labels[:num_preview].cpu().tolist()
+    os.makedirs(f"{figure_root}/{args.dataset}/preview", exist_ok=True)
+    if os.listdir(f"{figure_root}/{args.dataset}/preview") == []:
+        sample = next(iter(train_dataloader))
+        if isinstance(sample, (tuple, list)):
+            images, labels = sample
+            print(f"\nInput sample shape: {tuple(images.shape)}")
+            print(f"Labels shape: {tuple(labels.shape)}\n")
+        else:
+            images = sample
+            print(f"\nInput sample shape: {tuple(images.shape)}\n")
+        
+        if isinstance(sample, (tuple, list)):
+            num_preview = min(10, images.shape[0])
+            preview_images = images[:num_preview].cpu()
+            preview_labels = labels[:num_preview].cpu().tolist()
 
-        preview_save_path = f"{figure_root}/{args.dataset}/preview/sample_images_grid_{args.dataset}.png"
-        os.makedirs(f"{figure_root}/{args.dataset}/preview", exist_ok=True)
-        try:
-            torchvision.utils.save_image(
-                preview_images,
-                preview_save_path,
-                nrow=num_preview // 2,
-                normalize=True
-            )
-            print(f"Saved preview grid of {num_preview} images to {preview_save_path}\n")
-        except Exception as e:
-            print(f"Failed to save preview grid: {e}")
+            preview_save_path = f"{figure_root}/{args.dataset}/preview/sample_images_grid_{args.dataset}.png"
+            try:
+                torchvision.utils.save_image(
+                    preview_images,
+                    preview_save_path,
+                    nrow=num_preview // 2,
+                    normalize=True
+                )
+                print(f"Saved preview grid of {num_preview} images to {preview_save_path}\n")
+            except Exception as e:
+                print(f"Failed to save preview grid: {e}")
+    else:
+        print(f"Preview directory {figure_root}/{args.dataset}/preview is not empty; skipping preview image save.\n")
     # ----------------------------------------------
 
     # *Configurate the noise scheduler
