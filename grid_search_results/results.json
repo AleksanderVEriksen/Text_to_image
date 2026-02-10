@@ -5,8 +5,11 @@
     "schedule": "squaredcos_cap_v2",
     "run_name": "squaredcos_cap_v2_lr5e-05_bs16",
     "models_dir": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16",
-    "best_fid": 105.70138218580539,
-    "best_fid_path": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16\\best_fid_model_10.pth"
+    "best_fid": 101.78554622011774,
+    "best_fid_path": "grid_search_results/models\\mnist\\16_squaredcos_cap_v2_lr5e-05_bs16\\best_fid_model_10.pth",
+    "runtime_seconds": 643.5822880268097,
+    "fid_per_sec_raw": 0.15815467285805362,
+    "efficiency_fid_per_sec": 0.8634425292540892
   },
   {
     "batch_size": 32,
@@ -14,8 +17,11 @@
     "schedule": "squaredcos_cap_v2",
     "run_name": "squaredcos_cap_v2_lr5e-05_bs32",
     "models_dir": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32",
-    "best_fid": 168.9235596582322,
-    "best_fid_path": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32\\best_fid_model_10.pth"
+    "best_fid": 284.36562624996304,
+    "best_fid_path": "grid_search_results/models\\mnist\\32_squaredcos_cap_v2_lr5e-05_bs32\\best_fid_model_10.pth",
+    "runtime_seconds": 8652.018790245056,
+    "fid_per_sec_raw": 0.03286696817748228,
+    "efficiency_fid_per_sec": 0.9681788950657636
   },
   {
     "batch_size": 64,
@@ -23,7 +29,10 @@
     "schedule": "squaredcos_cap_v2",
     "run_name": "squaredcos_cap_v2_lr5e-05_bs64",
     "models_dir": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64",
-    "best_fid": 260.51105618839256,
-    "best_fid_path": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64\\best_fid_model_10.pth"
+    "best_fid": 288.1180983422855,
+    "best_fid_path": "grid_search_results/models\\mnist\\64_squaredcos_cap_v2_lr5e-05_bs64\\best_fid_model_10.pth",
+    "runtime_seconds": 439.7381942272186,
+    "fid_per_sec_raw": 0.6552037146753076,
+    "efficiency_fid_per_sec": 0.6041552415173045
   }
 ]

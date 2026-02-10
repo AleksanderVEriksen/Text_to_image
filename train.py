@@ -72,6 +72,7 @@ scaler = GradScaler()
 warnings.filterwarnings("ignore", category=UserWarning, module="torch.optim.lr_scheduler")
 # ----------------------------------------------
 # TODO: Train for a total 500-2000 epochs on a model. Evaluate ema model also
+# TODO: Best config: UNET, squaredcos_cap_v2, lr=5e-5, batch_size=16, 1000 timesteps, 10 FID epochs, 5 IS epochs, patience 5, top_k_models=2
 # ----------------------------------------------
 # *Parse command line arguments
 def parse_args():
